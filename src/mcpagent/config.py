@@ -150,13 +150,44 @@ def _resolve_dict(d: dict[str, Any]) -> dict[str, Any]:
 # Loaders
 # ---------------------------------------------------------------------------
 
+def _strip_json_comments(text: str) -> str:
+    """Remove // and /* */ comments and trailing commas from JSON text (JSONC support)."""
+    result: list[str] = []
+    i = 0
+    in_string = False
+    while i < len(text):
+        ch = text[i]
+        # Handle string literals (skip comment detection inside strings)
+        if ch == '"' and (i == 0 or text[i - 1] != '\\'):
+            in_string = not in_string
+            result.append(ch)
+            i += 1
+        elif not in_string and text[i:i+2] == '//':
+            # Line comment — skip until newline
+            i = text.find('\n', i)
+            if i == -1:
+                break
+        elif not in_string and text[i:i+2] == '/*':
+            # Block comment — skip until */
+            end = text.find('*/', i + 2)
+            i = end + 2 if end != -1 else len(text)
+        else:
+            result.append(ch)
+            i += 1
+    # Strip trailing commas before } or ]
+    import re as _re
+    cleaned = _re.sub(r',\s*([}\]])', r'\1', ''.join(result))
+    return cleaned
+
+
 def load_mcp_config(path: str | Path) -> McpConfig:
-    """Load and parse an mcp.json file (VS Code format)."""
+    """Load and parse an mcp.json file (VS Code JSONC format — comments allowed)."""
     path = Path(path)
     if not path.exists():
         return McpConfig()
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    raw = json.loads(_strip_json_comments(text))
     servers_raw: dict[str, Any] = raw.get("servers", {})
 
     servers: dict[str, McpServerConfig] = {}

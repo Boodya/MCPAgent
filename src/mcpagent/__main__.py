@@ -17,13 +17,18 @@ def main_entry() -> None:
         asyncio.run(async_main())
     except KeyboardInterrupt:
         pass
+    except (RuntimeError, BaseExceptionGroup):
+        # Suppress anyio/MCP cancel scope errors during shutdown
+        pass
 
 
 async def async_main() -> None:
+    from mcpagent.agent_presets import AgentPresetLoader
     from mcpagent.config import load_app_config, AppConfig
     from mcpagent.llm import LLMClient
     from mcpagent.mcp_manager import MCPManager
     from mcpagent.memory import MemoryManager
+    from mcpagent.skills import SkillLoader
     from mcpagent.storage import StorageManager
     from mcpagent.tools import ToolRegistry
     from mcpagent.agent import Agent
@@ -95,11 +100,27 @@ async def async_main() -> None:
         # --- Tools ---
         tools = ToolRegistry(memory=memory, mcp=mcp_mgr, tools_config=config.tools)
 
+        # --- Skills ---
+        skills_dir = Path(config.skills_dir)
+        skill_loader = SkillLoader(skills_dir)
+
+        # --- Agent Presets ---
+        agents_dir = Path(config.agents_dir)
+        preset_loader = AgentPresetLoader(agents_dir)
+
         # --- Agent ---
-        agent = Agent(llm=llm, tools=tools, memory=memory, config=config.agent, storage=storage)
+        agent = Agent(
+            llm=llm, tools=tools, memory=memory,
+            config=config.agent, storage=storage,
+            preset_loader=preset_loader,
+            skill_loader=skill_loader,
+        )
 
         # --- CLI ---
-        cli = CLI(agent=agent, tools=tools, mcp=mcp_mgr, storage=storage)
+        cli = CLI(
+            agent=agent, tools=tools, mcp=mcp_mgr,
+            storage=storage, skill_loader=skill_loader,
+        )
         await cli.run()
 
     finally:
@@ -110,7 +131,13 @@ async def async_main() -> None:
             storage.flush_logs()
 
         if mcp_mgr:
-            await mcp_mgr.__aexit__(None, None, None)
+            try:
+                await mcp_mgr.__aexit__(None, None, None)
+            except (RuntimeError, BaseExceptionGroup, Exception):
+                # MCP SDK uses anyio task groups that can raise RuntimeError
+                # ("Attempted to exit cancel scope in a different task")
+                # on shutdown. This is harmless — connections are dead anyway.
+                pass
         await llm.close()
         memory.cleanup_session()
 
