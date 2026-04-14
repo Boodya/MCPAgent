@@ -14,3 +14,4 @@ memories/session/
 tmp/
 tests-results/
 config/mcp.json
+.local-assistants/

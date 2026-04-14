@@ -218,6 +218,12 @@ async def _cmd_chat() -> None:
             bg_mgr = BackgroundManager(engine, wf_loader)
 
         # --- Agent ---
+        platform_paths = {
+            "agents_dir": str(agents_dir),
+            "skills_dir": str(skills_dir),
+            "workflows_dir": str(workflows_dir),
+            "data_dir": str(data_dir),
+        }
         agent = Agent(
             llm=llm, tools=tools, memory=memory,
             config=config.agent, storage=storage,
@@ -226,6 +232,7 @@ async def _cmd_chat() -> None:
             mcp_manager=mcp_mgr,
             background=bg_mgr,
             ops=ops,
+            platform_paths=platform_paths,
         )
 
         # --- CLI ---

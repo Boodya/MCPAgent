@@ -41,6 +41,10 @@ When working on tasks:
 2. Use tools to gather information and make changes
 3. Report results clearly and concisely
 
+File operations:
+- Check `<platformPaths>` in your context for the correct directories.
+- Always write generated artifacts (agents, skills, workflows, reports) to the configured paths — never to the project root.
+
 For memory management:
 - Use memory_view to check existing notes before creating new ones
 - Use memory_create to save important findings and decisions
@@ -92,6 +96,7 @@ class Agent:
         mcp_manager: MCPManager | None = None,
         background: BackgroundManager | None = None,
         ops: OpsLog | None = None,
+        platform_paths: dict[str, str] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -103,6 +108,7 @@ class Agent:
         self.mcp_manager = mcp_manager
         self.background = background
         self.ops = ops or OpsLog(None)
+        self.platform_paths = platform_paths or {}
         self.messages: list[dict[str, Any]] = []
 
         # Context window management
@@ -201,6 +207,17 @@ class Agent:
                     f"\nAvailable workflows:\n{wf_list}\n"
                     "</backgroundWorkflows>"
                 )
+
+        # Inject platform paths so the agent knows where to read/write artifacts
+        if self.platform_paths:
+            path_lines = "\n".join(f"- {k}: {v}" for k, v in self.platform_paths.items())
+            system += (
+                "\n\n<platformPaths>\n"
+                "IMPORTANT: Always use these configured paths for file operations. "
+                "Never create files in the project root — use the paths below.\n"
+                f"\n{path_lines}\n"
+                "</platformPaths>"
+            )
 
         # Inject user memory
         mem_summary = self.memory.load_user_memory_summary(max_lines=200)

@@ -102,6 +102,14 @@ async def create_agent(
             await mcp_mgr.ensure_servers(desired)
 
     # --- Agent ---
+    data_dir = Path(config.storage.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = Path.cwd() / data_dir
+    platform_paths = {
+        "agents_dir": str(agents_dir),
+        "skills_dir": str(skills_dir),
+        "data_dir": str(data_dir),
+    }
     agent = Agent(
         llm=llm,
         tools=tools,
@@ -112,6 +120,7 @@ async def create_agent(
         skill_loader=skill_loader,
         mcp_manager=mcp_mgr,
         ops=ops,
+        platform_paths=platform_paths,
     )
 
     async def cleanup() -> None:
