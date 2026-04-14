@@ -1,15 +1,6 @@
 ---
 name: code-review
 description: Reviews code for bugs, style issues, and security vulnerabilities
-triggers:
-  - review code
-  - code review
-  - review this
-  - review file
-  - review the
-  - check code
-  - find bugs
-  - security review
 ---
 # Code Review Skill
 

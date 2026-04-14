@@ -97,7 +97,6 @@ class CLI:
     async def _run_agent(self, user_input: str) -> None:
         self.console.print()
         text_buffer = ""
-        skills_shown = False
 
         try:
             async for event in self.agent.run(user_input):
@@ -111,20 +110,28 @@ class CLI:
                     if text_buffer:
                         print()
                         text_buffer = ""
-                    args_str = _truncate(str(event.tool_args), 200)
-                    self.console.print(
-                        f"  [tool.name]⚡ {event.tool_name}[/tool.name]({args_str})"
-                    )
-
-                elif event.type == "skill_activated":
-                    if not skills_shown:
-                        self.console.print("[bold yellow]📚 Skills activated:[/bold yellow]")
-                        skills_shown = True
-                    self.console.print(f"  [bold yellow]→[/bold yellow] [bold]{event.content}[/bold]")
+                    # Special display for skill loading
+                    if event.tool_name == "load_skill":
+                        skill_name = event.tool_args.get("name", "?")
+                        self.console.print(
+                            f"  [bold yellow]📚 Loading skill:[/bold yellow] [bold]{skill_name}[/bold]"
+                        )
+                    else:
+                        args_str = _truncate(str(event.tool_args), 200)
+                        self.console.print(
+                            f"  [tool.name]⚡ {event.tool_name}[/tool.name]({args_str})"
+                        )
 
                 elif event.type == "tool_result":
-                    result_preview = _truncate(event.content, 300)
-                    self.console.print(f"  [tool.result]→ {result_preview}[/tool.result]")
+                    # Skip verbose output for skill loading
+                    if event.tool_name == "load_skill":
+                        if "already_loaded" in event.content:
+                            self.console.print(f"  [dim]→ already loaded[/dim]")
+                        else:
+                            self.console.print(f"  [bold yellow]→ loaded[/bold yellow]")
+                    else:
+                        result_preview = _truncate(event.content, 300)
+                        self.console.print(f"  [tool.result]→ {result_preview}[/tool.result]")
 
                 elif event.type == "context_summarizing":
                     self.console.print(f"[bold blue]📝 {event.content}[/bold blue]")

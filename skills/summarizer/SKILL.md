@@ -1,13 +1,6 @@
 ---
 name: summarizer
 description: Summarizes files, code, logs, and documents concisely
-triggers:
-  - summarize
-  - summary
-  - tldr
-  - explain this file
-  - what does this do
-  - overview
 ---
 # Summarizer Skill
 

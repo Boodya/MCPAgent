@@ -94,6 +94,12 @@ class Agent:
             summary_max_tokens=self.config.summary_max_tokens,
         )
 
+        # Track which skills are loaded in this conversation
+        self._loaded_skills: set[str] = set()
+
+        # Register skill tools into the tool registry
+        self._register_skill_tools()
+
         self._init_system_prompt()
 
     @property
@@ -121,14 +127,16 @@ class Agent:
                 catalog_lines = []
                 for s in skills:
                     desc = f" — {s.description}" if s.description else ""
-                    triggers = f" (triggers: {', '.join(s.triggers)})" if s.triggers else ""
-                    catalog_lines.append(f"- {s.name}{desc}{triggers}")
+                    catalog_lines.append(f"- {s.name}{desc}")
                 catalog = "\n".join(catalog_lines)
                 system += (
                     "\n\n<availableSkills>\n"
-                    "The following skills are available. When a user's request matches a skill, "
-                    "the skill instructions will be automatically injected into the conversation. "
-                    "Follow skill instructions when they are provided.\n"
+                    "You have specialized skill modules that contain expert instructions "
+                    "for specific tasks. BEFORE starting work on a task, review this catalog "
+                    "and call `load_skill` for any relevant skill. "
+                    "This loads detailed instructions that improve your output quality.\n"
+                    "You can load multiple skills if needed. Already-loaded skills are skipped automatically.\n"
+                    "\nAvailable skills:\n"
                     f"{catalog}\n"
                     "</availableSkills>"
                 )
@@ -152,6 +160,7 @@ class Agent:
 
     def clear_history(self) -> None:
         """Reset conversation, keeping system prompt."""
+        self._loaded_skills.clear()
         self._init_system_prompt()
 
     # ------------------------------------------------------------------
@@ -161,11 +170,6 @@ class Agent:
     async def run(self, user_message: str) -> AsyncIterator[AgentEvent]:
         """Process a user message through the ReAct loop, yielding events."""
         self.messages.append({"role": "user", "content": user_message})
-
-        # --- Skill matching: inject matched skill instructions ---
-        activated_skills = self._match_and_inject_skills(user_message)
-        for skill in activated_skills:
-            yield AgentEvent(type="skill_activated", content=skill.name, tool_name=skill.name)
 
         openai_tools = self.tools.to_openai_tools()
 
@@ -300,35 +304,61 @@ class Agent:
         return await asyncio.gather(*tasks)
 
     # ------------------------------------------------------------------
-    # Skill orchestration
+    # Skill tools
     # ------------------------------------------------------------------
 
-    def _match_and_inject_skills(self, user_message: str) -> list[Skill]:
-        """Match user message against available skills, inject content as system context."""
-        if not self.skill_loader:
-            log.debug("No skill_loader configured")
-            return []
+    def _register_skill_tools(self) -> None:
+        """Register load_skill tool so the LLM can load skills on-demand."""
+        if not self.skill_loader or not self.skill_loader.get_all():
+            return
 
-        matched = self.skill_loader.match(user_message)
-        log.debug("Skill matching for %r: %d matched out of %d total",
-                   user_message[:80], len(matched), len(self.skill_loader.skills))
-        if not matched:
-            return []
+        from mcpagent.tools import _schema
 
-        # Build a single system message with all matched skill instructions
-        parts: list[str] = []
-        for skill in matched:
-            content = self.skill_loader.load_content(skill)
-            parts.append(f"<skill name=\"{skill.name}\">\n{content}\n</skill>")
+        async def _handle_load_skill(args: dict[str, Any]) -> str:
+            return self._load_skill(args.get("name", ""))
 
-        skill_msg = (
-            "The following skill instructions have been activated based on the user's request. "
-            "Follow these instructions carefully:\n\n" + "\n\n".join(parts)
+        self.tools.register(
+            "load_skill",
+            _handle_load_skill,
+            (
+                "Load a skill module by name. Call this BEFORE starting a task "
+                "when a relevant skill is available. Returns the skill instructions "
+                "to follow. Use /skills or the <availableSkills> catalog to see what's available."
+            ),
+            _schema(
+                {"name": {"type": "string", "description": "Exact skill name from the catalog."}},
+                required=["name"],
+            ),
         )
 
-        # Insert as a system message right before the user message (last in list)
-        # so the LLM sees: system prompt → ... → skill context → user message
-        self.messages.insert(-1, {"role": "system", "content": skill_msg})
+    def _load_skill(self, name: str) -> str:
+        """Load a skill by name and return its content."""
+        if not self.skill_loader:
+            return json.dumps({"error": "Skills not configured."})
 
-        log.info("Activated skills: %s", [s.name for s in matched])
-        return matched
+        # Find skill by name
+        skill = None
+        for s in self.skill_loader.get_all():
+            if s.name == name:
+                skill = s
+                break
+
+        if not skill:
+            available = [s.name for s in self.skill_loader.get_all()]
+            return json.dumps({"error": f"Skill '{name}' not found. Available: {available}"})
+
+        # Track loaded skill
+        was_new = name not in self._loaded_skills
+        self._loaded_skills.add(name)
+
+        if not was_new:
+            return json.dumps({"status": "already_loaded", "skill": name,
+                               "message": f"Skill '{name}' is already loaded. Proceed with the task."})
+
+        content = self.skill_loader.load_content(skill)
+        log.info("Loaded skill: %s", name)
+
+        return (
+            f"Skill '{name}' loaded. Follow these instructions for the current task:\n\n"
+            f"<skill name=\"{name}\">\n{content}\n</skill>"
+        )
