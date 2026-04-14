@@ -15,6 +15,7 @@ from rich.theme import Theme
 
 if TYPE_CHECKING:
     from mcpagent.agent import Agent, AgentEvent
+    from mcpagent.background import BackgroundManager
     from mcpagent.mcp_manager import MCPManager
     from mcpagent.skills import SkillLoader
     from mcpagent.storage import StorageManager
@@ -41,6 +42,7 @@ class CLI:
         storage: StorageManager | None = None,
         skill_loader: SkillLoader | None = None,
         config_dir: Path | None = None,
+        background: BackgroundManager | None = None,
     ) -> None:
         self.agent = agent
         self.tools = tools
@@ -48,7 +50,9 @@ class CLI:
         self.storage = storage
         self.skill_loader = skill_loader
         self.config_dir = config_dir
+        self.background = background
         self.console = Console(theme=THEME)
+        self._pending_bg_events: list = []
 
     # ------------------------------------------------------------------
     # Main REPL
@@ -68,10 +72,14 @@ class CLI:
 
         while True:
             try:
-                user_input = await asyncio.to_thread(self._get_input)
+                user_input = await self._wait_for_input()
             except (EOFError, KeyboardInterrupt):
                 self.console.print("\n[info]Goodbye![/info]")
                 break
+
+            if user_input is None:
+                # Only background events were processed, no user input
+                continue
 
             if not user_input.strip():
                 continue
@@ -85,6 +93,48 @@ class CLI:
 
             # Run agent
             await self._run_agent(user_input)
+
+    async def _wait_for_input(self) -> str | None:
+        """Wait for user input while monitoring background events.
+
+        If a background workflow completes while waiting, a proactive
+        notification is printed and the agent processes the result inline.
+        Returns the user''s input string, or raises EOFError/KeyboardInterrupt.
+        """
+        input_future = asyncio.ensure_future(asyncio.to_thread(self._get_input))
+
+        while not input_future.done():
+            # Wait on the input future with a short timeout
+            done, _ = await asyncio.wait({input_future}, timeout=0.5)
+            if done:
+                break
+
+            # Check for background events
+            if self.background:
+                try:
+                    event = self.background.events.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
+
+                # Proactive notification
+                status_style = "bold green" if event.status == "completed" else "bold red"
+                self.console.print(
+                    f"\n  [{status_style}]🔔 Background: "
+                    f"{event.workflow_name} — {event.status}[/{status_style}]"
+                )
+
+                # Run agent to process and report the result
+                notification = (
+                    f"[BACKGROUND WORKFLOW NOTIFICATION]\n"
+                    f"A background workflow has finished. Report the results to the user.\n\n"
+                    f"Task ID: {event.task_id}\n"
+                    f"Workflow: {event.workflow_name}\n"
+                    f"Status: {event.status}\n"
+                    f"Details:\n{event.summary}"
+                )
+                await self._run_agent(notification)
+
+        return input_future.result()
 
     def _get_input(self) -> str:
         agent_name = self.agent.active_agent_name
@@ -224,6 +274,10 @@ class CLI:
             await self._cmd_reload()
             return True
 
+        if command == "/bg":
+            self._cmd_bg()
+            return True
+
         self.console.print(f"[error]Unknown command: {command}. Type /help[/error]")
         return True
 
@@ -243,9 +297,27 @@ class CLI:
             "/agent <name>   — Switch to a different agent preset\n"
             "/skills         — List available skills\n"
             "/context        — Show context window usage\n"
+            "/bg             — Show background workflow tasks\n"
             "/reload         — Reload agents, skills, and MCP config from disk",
             title="Commands",
         ))
+
+    def _cmd_bg(self) -> None:
+        if not self.background:
+            self.console.print("[info]Background workflows not available (no workflows configured).[/info]")
+            return
+        tasks = self.background.get_tasks()
+        if not tasks:
+            self.console.print("[info]No background tasks.[/info]")
+            return
+        self.console.print(f"[info]Background tasks ({len(tasks)}):[/info]")
+        for t in tasks:
+            icon = {"running": "⏳", "completed": "✓", "failed": "✗", "cancelled": "⊘"}.get(t.status, "?")
+            elapsed = ""
+            if t.finished_at:
+                delta = t.finished_at - t.started_at
+                elapsed = f" ({delta.total_seconds():.1f}s)"
+            self.console.print(f"  {icon} {t.id}: {t.workflow_name} — {t.status}{elapsed}")
 
     def _cmd_tools(self) -> None:
         tools = self.tools.to_openai_tools()

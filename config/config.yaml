@@ -18,9 +18,10 @@ agent:
   summary_max_tokens: 1000     # max tokens for the summary
 
 storage:
-  data_dir: "temp-memory"      # all data stored here: memories, chat history, logs
+  data_dir: "tmp"      # all data stored here: memories, chat history, logs
   chat_history: true           # save conversation history to data_dir/history/
   logs: true                   # save execution logs to data_dir/logs/
 
 skills_dir: "skills"
 agents_dir: "agents"
+workflows_dir: "workflows"

@@ -8,12 +8,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from pydantic import BaseModel, Field as PydanticField
+
 from mcpagent.agent_presets import AgentPreset, AgentPresetLoader
+from mcpagent.background import BackgroundManager
 from mcpagent.config import AgentConfig
 from mcpagent.context import ContextManager
 from mcpagent.llm import LLMClient
 from mcpagent.memory import MemoryManager
 from mcpagent.mcp_manager import MCPManager
+from mcpagent.ops_log import OpsLog
 from mcpagent.skills import Skill, SkillLoader
 from mcpagent.storage import StorageManager
 from mcpagent.tools import ToolRegistry
@@ -65,6 +69,14 @@ class AgentEvent:
     tool_call_id: str = ""
 
 
+class AgentResult(BaseModel):
+    """Collected result of a headless agent run."""
+
+    text: str = ""
+    tool_calls: list[dict[str, Any]] = PydanticField(default_factory=list)
+    error: str | None = None
+
+
 class Agent:
     """ReAct agent: streams LLM responses, dispatches tool calls, iterates."""
 
@@ -78,6 +90,8 @@ class Agent:
         preset_loader: AgentPresetLoader | None = None,
         skill_loader: SkillLoader | None = None,
         mcp_manager: MCPManager | None = None,
+        background: BackgroundManager | None = None,
+        ops: OpsLog | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -87,6 +101,8 @@ class Agent:
         self.preset_loader = preset_loader
         self.skill_loader = skill_loader
         self.mcp_manager = mcp_manager
+        self.background = background
+        self.ops = ops or OpsLog(None)
         self.messages: list[dict[str, Any]] = []
 
         # Context window management
@@ -105,6 +121,9 @@ class Agent:
 
         # Register subagent tool if any agent defines subagents
         self._register_subagent_tool()
+
+        # Register background workflow tools
+        self._register_workflow_tools()
 
         self._init_system_prompt()
 
@@ -167,6 +186,22 @@ class Agent:
                     "</availableSubagents>"
                 )
 
+        # Inject available workflows for background execution
+        if self.background:
+            wf_names = self.background.get_workflow_names()
+            if wf_names:
+                wf_list = "\n".join(f"- {n}" for n in wf_names)
+                system += (
+                    "\n\n<backgroundWorkflows>\n"
+                    "You can run workflows in the background using the `workflow_run` tool. "
+                    "This starts a workflow asynchronously and returns immediately — the user "
+                    "can continue chatting while it runs. You will be notified when it completes.\n"
+                    "Use `workflow_status` to check on running tasks, "
+                    "and `workflow_list` to see available workflows.\n"
+                    f"\nAvailable workflows:\n{wf_list}\n"
+                    "</backgroundWorkflows>"
+                )
+
         # Inject user memory
         mem_summary = self.memory.load_user_memory_summary(max_lines=200)
         if mem_summary:
@@ -202,6 +237,30 @@ class Agent:
         self._loaded_skills.clear()
         self._init_system_prompt()
 
+    async def run_to_completion(self, message: str) -> AgentResult:
+        """Run the agent headlessly and return the collected result."""
+        text_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        error: str | None = None
+
+        async for event in self.run(message):
+            if event.type == "text":
+                text_parts.append(event.content)
+            elif event.type == "tool_call":
+                tool_calls.append({
+                    "name": event.tool_name,
+                    "args": event.tool_args,
+                    "id": event.tool_call_id,
+                })
+            elif event.type == "error":
+                error = event.content
+
+        return AgentResult(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            error=error,
+        )
+
     # ------------------------------------------------------------------
     # Main execution loop
     # ------------------------------------------------------------------
@@ -227,7 +286,11 @@ class Agent:
                 )
 
             # --- Call LLM (streaming) ---
-            stream = await self.llm.chat(self.messages, tools=openai_tools or None)
+            stream = await self.llm.chat(
+                self.messages,
+                tools=openai_tools or None,
+                agent_name=self.active_agent_name,
+            )
 
             # Accumulate the full response from stream
             collected_text = ""
@@ -295,10 +358,23 @@ class Agent:
                         tool_args=call.arguments,
                         tool_call_id=call.id,
                     )
+                    self.ops.tool_call(
+                        agent=self.active_agent_name,
+                        tool=call.name,
+                        args=call.arguments,
+                    )
 
                 results = await self._execute_tool_calls(parsed_calls)
 
                 for call, result in zip(parsed_calls, results):
+                    is_error = result.startswith('{"error"')
+                    self.ops.tool_result(
+                        agent=self.active_agent_name,
+                        tool=call.name,
+                        result_length=len(result),
+                        error=result if is_error else None,
+                    )
+
                     yield AgentEvent(
                         type="tool_result",
                         content=result,
@@ -501,7 +577,11 @@ class Agent:
         for iteration in range(max_iter):
             log.debug("Sub-agent '%s' iteration %d", name, iteration + 1)
 
-            stream = await self.llm.chat(messages, tools=openai_tools or None)
+            stream = await self.llm.chat(
+                messages,
+                tools=openai_tools or None,
+                agent_name=f"sub:{name}",
+            )
 
             collected_text = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -560,3 +640,91 @@ class Agent:
 
         log.info("Sub-agent '%s' completed", name)
         return f"[Sub-agent: {name}]\n{final_text}"
+
+    # ------------------------------------------------------------------
+    # Background workflow tools
+    # ------------------------------------------------------------------
+
+    def _register_workflow_tools(self) -> None:
+        """Register workflow tools so the LLM can run workflows in the background."""
+        if not self.background:
+            return
+
+        from mcpagent.tools import _schema
+
+        # --- workflow_run ---
+
+        async def _handle_workflow_run(args: dict[str, Any]) -> str:
+            name = args.get("name", "")
+            try:
+                task_id = self.background.submit(name)  # type: ignore[union-attr]
+                return json.dumps({
+                    "status": "submitted",
+                    "task_id": task_id,
+                    "workflow": name,
+                    "message": f"Workflow '{name}' started in background as {task_id}. "
+                               f"You will be notified when it completes.",
+                })
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+
+        self.tools.register(
+            "workflow_run",
+            _handle_workflow_run,
+            (
+                "Start a workflow in the background. The workflow runs asynchronously "
+                "while the user continues chatting. Returns a task ID immediately. "
+                "You will receive a notification when the workflow completes."
+            ),
+            _schema(
+                {"name": {"type": "string", "description": "Name of the workflow to run."}},
+                required=["name"],
+            ),
+        )
+
+        # --- workflow_list ---
+
+        async def _handle_workflow_list(args: dict[str, Any]) -> str:
+            names = self.background.get_workflow_names()  # type: ignore[union-attr]
+            return json.dumps({"workflows": names})
+
+        self.tools.register(
+            "workflow_list",
+            _handle_workflow_list,
+            "List all available workflow definitions that can be run.",
+            _schema({}),
+        )
+
+        # --- workflow_status ---
+
+        async def _handle_workflow_status(args: dict[str, Any]) -> str:
+            task_id = args.get("task_id")
+            tasks = self.background.get_tasks(task_id)  # type: ignore[union-attr]
+            if not tasks:
+                return json.dumps({"message": "No background tasks found."})
+            result = []
+            for t in tasks:
+                entry = {
+                    "task_id": t.id,
+                    "workflow": t.workflow_name,
+                    "status": t.status,
+                    "started_at": t.started_at.isoformat(),
+                }
+                if t.finished_at:
+                    entry["finished_at"] = t.finished_at.isoformat()
+                if t.error:
+                    entry["error"] = t.error
+                result.append(entry)
+            return json.dumps({"tasks": result})
+
+        self.tools.register(
+            "workflow_status",
+            _handle_workflow_status,
+            (
+                "Check the status of background workflow tasks. "
+                "Call without arguments to see all tasks, or pass a task_id to check a specific one."
+            ),
+            _schema(
+                {"task_id": {"type": "string", "description": "Optional task ID to check (e.g. 'bg-1')."}},
+            ),
+        )

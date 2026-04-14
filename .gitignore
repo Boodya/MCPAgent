@@ -11,6 +11,6 @@ build/
 venv/
 memories/session/
 .mcpagent/
-temp-memory/
+tmp/
 tests-results/
 config/mcp.json

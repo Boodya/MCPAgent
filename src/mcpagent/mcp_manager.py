@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from mcpagent.config import McpServerConfig
+from mcpagent.ops_log import OpsLog
 
 log = logging.getLogger(__name__)
 
@@ -46,11 +47,12 @@ class MCPManager:
         await mgr.shutdown()                                  # stop all
     """
 
-    def __init__(self, servers: dict[str, McpServerConfig]) -> None:
+    def __init__(self, servers: dict[str, McpServerConfig], *, ops: OpsLog | None = None) -> None:
         self._server_configs = servers
         self._connections: dict[str, ServerConnection] = {}
         # Mapping from qualified tool name → (server_name, original_tool_name)
         self._tool_map: dict[str, tuple[str, str]] = {}
+        self.ops = ops or OpsLog(None)
 
     # ------------------------------------------------------------------
     # Lifecycle — selective start/stop
@@ -119,9 +121,14 @@ class MCPManager:
             to_remove = [qn for qn, (sn, _) in self._tool_map.items() if sn == name]
             for qn in to_remove:
                 del self._tool_map[qn]
-            # Tear down server's exit stack
+            # Tear down server's exit stack (with timeout to avoid hanging)
             try:
-                await conn.exit_stack.__aexit__(None, None, None)
+                await asyncio.wait_for(
+                    conn.exit_stack.__aexit__(None, None, None),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("MCP server '%s' shutdown timed out, forcing", name)
             except (RuntimeError, BaseExceptionGroup, Exception):
                 pass  # MCP/anyio shutdown quirks
             stopped.append(name)
@@ -265,6 +272,8 @@ class MCPManager:
 
     async def call_tool(self, qualified_name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call to the appropriate MCP server."""
+        import time as _time
+
         mapping = self._tool_map.get(qualified_name)
         if not mapping:
             return json.dumps({"error": f"Unknown tool: {qualified_name}"})
@@ -274,11 +283,20 @@ class MCPManager:
         if not conn:
             return json.dumps({"error": f"Server '{server_name}' not connected"})
 
+        t0 = _time.perf_counter()
         try:
             result = await conn.session.call_tool(tool_name, arguments=arguments)
         except Exception as exc:
+            elapsed_ms = (_time.perf_counter() - t0) * 1000
             log.exception("Tool call %s failed", qualified_name)
+            self.ops.tool_result(
+                tool=qualified_name,
+                error=str(exc),
+                duration_ms=round(elapsed_ms, 1),
+            )
             return json.dumps({"error": str(exc)})
+
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
 
         # Flatten MCP result to string
         if hasattr(result, "content"):
@@ -288,9 +306,16 @@ class MCPManager:
                     parts.append(item.text)
                 else:
                     parts.append(str(item))
-            return "\n".join(parts) if parts else "(empty result)"
+            text = "\n".join(parts) if parts else "(empty result)"
+        else:
+            text = str(result)
 
-        return str(result)
+        self.ops.tool_result(
+            tool=qualified_name,
+            result_length=len(text),
+            duration_ms=round(elapsed_ms, 1),
+        )
+        return text
 
     def is_mcp_tool(self, name: str) -> bool:
         """Check if a tool name belongs to an MCP server."""
