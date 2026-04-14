@@ -109,6 +109,12 @@ async def async_main() -> None:
                 agents_dir = candidate
         preset_loader = AgentPresetLoader(agents_dir)
 
+        # Switch to the configured default agent
+        if config.default_agent != "default":
+            switched = preset_loader.switch(config.default_agent)
+            if not switched:
+                print(f"Warning: default_agent '{config.default_agent}' not found, using 'default'", file=sys.stderr)
+
         # --- Start MCP servers for the default agent ---
         if mcp_mgr:
             default_preset = preset_loader.active
@@ -140,6 +146,7 @@ async def async_main() -> None:
         cli = CLI(
             agent=agent, tools=tools, mcp=mcp_mgr,
             storage=storage, skill_loader=skill_loader,
+            config_dir=config_dir,
         )
         await cli.run()
 

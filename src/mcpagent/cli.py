@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -39,12 +40,14 @@ class CLI:
         mcp: MCPManager | None = None,
         storage: StorageManager | None = None,
         skill_loader: SkillLoader | None = None,
+        config_dir: Path | None = None,
     ) -> None:
         self.agent = agent
         self.tools = tools
         self.mcp = mcp
         self.storage = storage
         self.skill_loader = skill_loader
+        self.config_dir = config_dir
         self.console = Console(theme=THEME)
 
     # ------------------------------------------------------------------
@@ -217,6 +220,10 @@ class CLI:
             self._cmd_context()
             return True
 
+        if command == "/reload":
+            await self._cmd_reload()
+            return True
+
         self.console.print(f"[error]Unknown command: {command}. Type /help[/error]")
         return True
 
@@ -235,7 +242,8 @@ class CLI:
             "/agents         — List available agent presets\n"
             "/agent <name>   — Switch to a different agent preset\n"
             "/skills         — List available skills\n"
-            "/context        — Show context window usage",
+            "/context        — Show context window usage\n"
+            "/reload         — Reload agents, skills, and MCP config from disk",
             title="Commands",
         ))
 
@@ -350,6 +358,38 @@ class CLI:
         )
         if stats["summarizations"] > 0:
             self.console.print(f"  Summarizations performed: {stats['summarizations']}")
+
+    async def _cmd_reload(self) -> None:
+        """Reload agents, skills, and MCP config from disk."""
+        from mcpagent.config import load_mcp_config
+
+        # Reload agents
+        if self.agent.preset_loader:
+            count = self.agent.preset_loader.reload()
+            self.console.print(f"  [info]Agents:[/info] {count} loaded")
+
+        # Reload skills
+        if self.skill_loader:
+            count = self.skill_loader.reload()
+            self.console.print(f"  [info]Skills:[/info] {count} loaded")
+
+        # Reload MCP config
+        if self.mcp and self.config_dir:
+            mcp_path = self.config_dir / "mcp.json"
+            mcp_cfg = load_mcp_config(mcp_path)
+            if mcp_cfg.servers:
+                added, removed = await self.mcp.reload_config(mcp_cfg.servers)
+                total = len(self.mcp.get_available_server_names())
+                msg = f"  [info]MCP servers:[/info] {total} configured"
+                if added:
+                    msg += f" [dim](+{', '.join(added)})[/dim]"
+                if removed:
+                    msg += f" [dim](-{', '.join(removed)})[/dim]"
+                self.console.print(msg)
+            else:
+                self.console.print("  [info]MCP servers:[/info] none in mcp.json")
+
+        self.console.print("[info]Reload complete.[/info]")
 
     # ------------------------------------------------------------------
     # Status display

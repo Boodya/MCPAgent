@@ -111,6 +111,7 @@ class AppConfig(BaseModel):
 
     models: dict[str, ModelConfig] = Field(default_factory=lambda: {"default": ModelConfig()})
     default_model: str = "default"
+    default_agent: str = "default"
     agent: AgentConfig = Field(default_factory=AgentConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     skills_dir: str = "skills"

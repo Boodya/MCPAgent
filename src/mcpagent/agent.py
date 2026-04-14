@@ -287,16 +287,18 @@ class Agent:
                         args = {}
                     parsed_calls.append(ToolCallRequest(id=tc["id"], name=tc["name"], arguments=args))
 
-                # Execute all tool calls (parallel for independent calls)
-                results = await self._execute_tool_calls(parsed_calls)
-
-                for call, result in zip(parsed_calls, results):
+                # Execute tool calls: yield tool_call BEFORE execution, tool_result AFTER
+                for call in parsed_calls:
                     yield AgentEvent(
                         type="tool_call",
                         tool_name=call.name,
                         tool_args=call.arguments,
                         tool_call_id=call.id,
                     )
+
+                results = await self._execute_tool_calls(parsed_calls)
+
+                for call, result in zip(parsed_calls, results):
                     yield AgentEvent(
                         type="tool_result",
                         content=result,

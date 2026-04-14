@@ -230,6 +230,31 @@ class MCPManager:
         """Return names of all configured servers (whether connected or not)."""
         return list(self._server_configs.keys())
 
+    async def reload_config(self, servers: dict[str, McpServerConfig]) -> tuple[list[str], list[str]]:
+        """Update server configs from a freshly-loaded mcp.json.
+
+        - New servers become available (not started until requested).
+        - Removed servers are stopped if running.
+        - Existing server configs are updated (takes effect on next connect).
+
+        Returns (added, removed) server name lists.
+        """
+        old_names = set(self._server_configs.keys())
+        new_names = set(servers.keys())
+
+        added = sorted(new_names - old_names)
+        removed = sorted(old_names - new_names)
+
+        # Stop removed servers that are currently running
+        running_removed = [n for n in removed if n in self._connections]
+        if running_removed:
+            await self._stop_servers(running_removed)
+
+        # Update config
+        self._server_configs = servers
+
+        return added, removed
+
     def get_server_tool_count(self, name: str) -> int:
         conn = self._connections.get(name)
         return len(conn.tools) if conn else 0

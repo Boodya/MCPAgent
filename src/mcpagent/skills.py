@@ -112,3 +112,12 @@ class SkillLoader:
 
     def get_all(self) -> list[Skill]:
         return list(self.skills)
+
+    def reload(self) -> int:
+        """Re-scan skills directory from disk.
+
+        Returns the number of skills loaded.
+        """
+        self.skills.clear()
+        self._scan()
+        return len(self.skills)

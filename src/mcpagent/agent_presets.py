@@ -128,6 +128,20 @@ class AgentPresetLoader:
             self.active = preset
         return preset
 
+    def reload(self) -> int:
+        """Re-scan agents directory, preserving the active agent if still present.
+
+        Returns the number of presets loaded.
+        """
+        active_name = self.active.name
+        self.presets.clear()
+        self._scan()
+        self._ensure_default()
+        # Restore active if still exists
+        if active_name in self.presets:
+            self.active = self.presets[active_name]
+        return len(self.presets)
+
     def get_names(self) -> list[str]:
         """Return sorted list of available preset names."""
         return sorted(self.presets.keys())
