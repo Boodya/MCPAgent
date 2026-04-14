@@ -7,7 +7,7 @@ models:
     provider: azure
 
 default_model: default
-default_agent: default          # agent preset to activate on startup (must match name in agents/*.md)
+default_agent: architect          # agent preset to activate on startup (must match name in agents/*.md)
 
 agent:
   max_iterations: 30

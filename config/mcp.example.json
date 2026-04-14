@@ -1,0 +1,23 @@
+{
+    "servers": {
+        "test-server": {
+            "type": "stdio",
+            "command": "python",
+            "args": ["mcp_servers/test_server/server.py"]
+        },
+        "microsoft-learn": {
+            "type": "http",
+            "url": "https://learn.microsoft.com/api/mcp"
+        },
+        "searxng": {
+            "type": "stdio",
+            "command": "mcp-searxng",
+            "args": [],
+            "env": {
+                "SEARXNG_URL": "http://localhost:51485",
+                "NODE_EXTRA_CA_CERTS": ""
+            }
+        }
+    },
+    "inputs": []
+}
