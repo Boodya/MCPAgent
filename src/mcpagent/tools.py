@@ -80,12 +80,37 @@ class ToolRegistry:
     # OpenAI format export
     # ------------------------------------------------------------------
 
-    def to_openai_tools(self) -> list[dict[str, Any]]:
-        """Return all tools (built-in + MCP) in OpenAI function-calling format."""
-        tools = [defn for _, defn in self._tools.values()]
+    def to_openai_tools(self, allowed: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return tools in OpenAI function-calling format, filtered by *allowed*.
+
+        Args:
+            allowed: None means all tools. A list of names (with optional ``*``
+                     wildcards, e.g. ``memory_*``) restricts which built-in tools
+                     are exposed. MCP tools are always included (filtered via
+                     MCPManager server set). ``load_skill`` and ``call_agent``
+                     are always included when registered.
+        """
+        tools: list[dict[str, Any]] = []
+        for name, (_, defn) in self._tools.items():
+            if allowed is None or self._matches_filter(name, allowed):
+                tools.append(defn)
         if self.mcp:
             tools.extend(self.mcp.get_all_tools_openai())
         return tools
+
+    @staticmethod
+    def _matches_filter(name: str, allowed: list[str]) -> bool:
+        """Check if *name* matches any entry in *allowed* (supports trailing ``*``)."""
+        # Always allow agent-internal tools
+        if name in ("load_skill", "call_agent"):
+            return True
+        for pattern in allowed:
+            if pattern.endswith("*"):
+                if name.startswith(pattern[:-1]):
+                    return True
+            elif name == pattern:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Dispatch

@@ -13,6 +13,7 @@ from mcpagent.config import AgentConfig
 from mcpagent.context import ContextManager
 from mcpagent.llm import LLMClient
 from mcpagent.memory import MemoryManager
+from mcpagent.mcp_manager import MCPManager
 from mcpagent.skills import Skill, SkillLoader
 from mcpagent.storage import StorageManager
 from mcpagent.tools import ToolRegistry
@@ -76,6 +77,7 @@ class Agent:
         storage: StorageManager | None = None,
         preset_loader: AgentPresetLoader | None = None,
         skill_loader: SkillLoader | None = None,
+        mcp_manager: MCPManager | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -84,6 +86,7 @@ class Agent:
         self.storage = storage
         self.preset_loader = preset_loader
         self.skill_loader = skill_loader
+        self.mcp_manager = mcp_manager
         self.messages: list[dict[str, Any]] = []
 
         # Context window management
@@ -99,6 +102,9 @@ class Agent:
 
         # Register skill tools into the tool registry
         self._register_skill_tools()
+
+        # Register subagent tool if any agent defines subagents
+        self._register_subagent_tool()
 
         self._init_system_prompt()
 
@@ -141,6 +147,26 @@ class Agent:
                     "</availableSkills>"
                 )
 
+        # Inject available subagents so the LLM knows valid call_agent targets
+        if preset and preset.subagents and self.preset_loader:
+            agent_lines = []
+            for agent_name in preset.subagents:
+                target = self.preset_loader.presets.get(agent_name)
+                if target:
+                    desc = f" — {target.description}" if target.description else ""
+                    agent_lines.append(f"- {agent_name}{desc}")
+                else:
+                    agent_lines.append(f"- {agent_name} (not found)")
+            if agent_lines:
+                catalog = "\n".join(agent_lines)
+                system += (
+                    "\n\n<availableSubagents>\n"
+                    "You can delegate tasks to these sub-agents via `call_agent` tool.\n"
+                    "Only the agents listed below are available. Do NOT invent agent names.\n"
+                    f"\n{catalog}\n"
+                    "</availableSubagents>"
+                )
+
         # Inject user memory
         mem_summary = self.memory.load_user_memory_summary(max_lines=200)
         if mem_summary:
@@ -148,15 +174,28 @@ class Agent:
 
         self.messages = [{"role": "system", "content": system}]
 
-    def switch_preset(self, name: str) -> str | None:
-        """Switch to a named agent preset. Returns preset name on success, None on failure."""
+    async def switch_preset(self, name: str) -> str | None:
+        """Switch to a named agent preset. Manages MCP server lifecycle.
+
+        Returns preset name on success, None on failure.
+        """
         if not self.preset_loader:
             return None
         preset = self.preset_loader.switch(name)
-        if preset:
-            self._init_system_prompt()
-            return preset.name
-        return None
+        if not preset:
+            return None
+
+        # Bring MCP servers in sync with the new agent's requirements
+        if self.mcp_manager:
+            started, stopped = await self.mcp_manager.ensure_servers(preset.mcp_servers)
+            if started:
+                log.info("Started MCP servers for agent '%s': %s", name, started)
+            if stopped:
+                log.info("Stopped MCP servers for agent '%s': %s", name, stopped)
+
+        self._loaded_skills.clear()
+        self._init_system_prompt()
+        return preset.name
 
     def clear_history(self) -> None:
         """Reset conversation, keeping system prompt."""
@@ -171,7 +210,9 @@ class Agent:
         """Process a user message through the ReAct loop, yielding events."""
         self.messages.append({"role": "user", "content": user_message})
 
-        openai_tools = self.tools.to_openai_tools()
+        openai_tools = self.tools.to_openai_tools(
+            allowed=self.active_preset.tools if self.active_preset else None,
+        )
 
         for iteration in range(self.config.max_iterations):
             log.debug("Agent iteration %d", iteration + 1)
@@ -362,3 +403,158 @@ class Agent:
             f"Skill '{name}' loaded. Follow these instructions for the current task:\n\n"
             f"<skill name=\"{name}\">\n{content}\n</skill>"
         )
+
+    # ------------------------------------------------------------------
+    # Subagent tool
+    # ------------------------------------------------------------------
+
+    def _register_subagent_tool(self) -> None:
+        """Register call_agent tool so the LLM can invoke other agents as sub-agents."""
+        if not self.preset_loader:
+            return
+
+        # Check if any agent defines subagents
+        has_subagents = any(p.subagents for p in self.preset_loader.get_all())
+        if not has_subagents:
+            return
+
+        from mcpagent.tools import _schema
+
+        async def _handle_call_agent(args: dict[str, Any]) -> str:
+            return await self._call_agent(args.get("name", ""), args.get("message", ""))
+
+        self.tools.register(
+            "call_agent",
+            _handle_call_agent,
+            (
+                "Invoke another agent as a sub-agent. The sub-agent runs a full "
+                "conversation with its own system prompt and tools, then returns "
+                "its final response. Use this to delegate specialized tasks. "
+                "IMPORTANT: only use agent names listed in <availableSubagents> in your system prompt."
+            ),
+            _schema(
+                {
+                    "name": {"type": "string", "description": "Name of the agent to invoke. Must be one of the agents listed in <availableSubagents>."},
+                    "message": {"type": "string", "description": "The task or question to send to the sub-agent."},
+                },
+                required=["name", "message"],
+            ),
+        )
+
+    async def _call_agent(self, name: str, message: str) -> str:
+        """Run a sub-agent and return its final text response."""
+        if not self.preset_loader:
+            return json.dumps({"error": "Agent presets not configured."})
+
+        # Check if current agent is allowed to call this sub-agent
+        current = self.active_preset
+        if current and name not in (current.subagents or []):
+            return json.dumps({
+                "error": f"Agent '{self.active_agent_name}' cannot call sub-agent '{name}'. "
+                         f"Allowed subagents: {current.subagents}"
+            })
+
+        preset = self.preset_loader.presets.get(name)
+        if not preset:
+            available = self.preset_loader.get_names()
+            return json.dumps({"error": f"Agent '{name}' not found. Available: {available}"})
+
+        log.info("Calling sub-agent '%s' with message: %s", name, message[:100])
+
+        # Build sub-agent system prompt (same logic as _init_system_prompt but for the target preset)
+        if preset.system_prompt:
+            system = preset.system_prompt
+        else:
+            system = DEFAULT_SYSTEM_PROMPT
+
+        # Inject skills catalog for the sub-agent too
+        if self.skill_loader:
+            skills = self.skill_loader.get_all()
+            if skills:
+                catalog_lines = []
+                for s in skills:
+                    desc = f" — {s.description}" if s.description else ""
+                    catalog_lines.append(f"- {s.name}{desc}")
+                catalog = "\n".join(catalog_lines)
+                system += (
+                    "\n\n<availableSkills>\n"
+                    "You have specialized skill modules. Call `load_skill` for relevant skills.\n"
+                    f"\nAvailable skills:\n{catalog}\n"
+                    "</availableSkills>"
+                )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": message},
+        ]
+
+        # Sub-agent uses the same tool registry and MCP connections
+        # but respects its own tool filter
+        openai_tools = self.tools.to_openai_tools(allowed=preset.tools)
+
+        # Run a limited ReAct loop for the sub-agent
+        max_iter = min(self.config.max_iterations, 15)  # cap sub-agent iterations
+        final_text = ""
+
+        for iteration in range(max_iter):
+            log.debug("Sub-agent '%s' iteration %d", name, iteration + 1)
+
+            stream = await self.llm.chat(messages, tools=openai_tools or None)
+
+            collected_text = ""
+            tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+                if delta.content:
+                    collected_text += delta.content
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_by_index:
+                            tool_calls_by_index[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
+                        entry = tool_calls_by_index[idx]
+                        if tc.id:
+                            entry["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                entry["name"] = tc.function.name
+                            if tc.function.arguments:
+                                entry["arguments"] += tc.function.arguments
+
+            if tool_calls_by_index:
+                assistant_msg: dict[str, Any] = {"role": "assistant", "content": collected_text or None}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    }
+                    for tc in tool_calls_by_index.values()
+                ]
+                messages.append(assistant_msg)
+
+                # Execute tool calls
+                for tc in tool_calls_by_index.values():
+                    try:
+                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    except json.JSONDecodeError:
+                        args = {}
+
+                    result = await self.tools.dispatch(tc["name"], args)
+                    truncated = self.ctx.truncate_tool_result(result)
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": truncated})
+
+                continue
+
+            # No tool calls — final answer
+            final_text = collected_text
+            break
+
+        if not final_text:
+            final_text = "(Sub-agent did not produce a final response)"
+
+        log.info("Sub-agent '%s' completed", name)
+        return f"[Sub-agent: {name}]\n{final_text}"

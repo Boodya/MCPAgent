@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+_SENTINEL = object()  # distinguish "key missing" from "key: null" in YAML
+
 
 @dataclass
 class AgentPreset:
@@ -18,6 +20,8 @@ class AgentPreset:
     model: str = "default"
     tools: list[str] | None = None  # None = all tools; list = filter
     skills: list[str] = field(default_factory=list)
+    mcp_servers: list[str] | None = None  # None = all servers; list = filter by name
+    subagents: list[str] = field(default_factory=list)
     system_prompt: str = ""
     file_path: Path = field(default_factory=lambda: Path())
 
@@ -29,6 +33,8 @@ _BUILTIN_DEFAULT = AgentPreset(
     model="default",
     tools=None,
     skills=[],
+    mcp_servers=None,
+    subagents=[],
     system_prompt="",  # empty = use DEFAULT_SYSTEM_PROMPT from agent.py
 )
 
@@ -79,13 +85,29 @@ class AgentPresetLoader:
         body = text[match.end():].strip()
 
         name = meta.get("name", path.stem)
-        tools_val = meta.get("tools")
-        if isinstance(tools_val, list):
+        # tools: None = all, list = specific tools, [] = none
+        # NOT specified in YAML → defaults to [] (no tools)
+        tools_val = meta.get("tools", _SENTINEL)
+        if tools_val is _SENTINEL:
+            tools: list[str] | None = []  # not specified → no tools
+        elif tools_val == "all":
+            tools = None  # explicitly "all" → all available
+        elif isinstance(tools_val, list):
             tools = tools_val
-        elif tools_val == "all" or tools_val is None:
-            tools = None
         else:
-            tools = None
+            tools = []
+
+        # mcp_servers: None = all, list = specific servers, [] = none
+        # NOT specified in YAML → defaults to [] (no MCP servers)
+        mcp_val = meta.get("mcp_servers", _SENTINEL)
+        if mcp_val is _SENTINEL:
+            mcp_servers: list[str] | None = []  # not specified → no servers
+        elif mcp_val == "all":
+            mcp_servers = None  # explicitly "all" → all available
+        elif isinstance(mcp_val, list):
+            mcp_servers = mcp_val
+        else:
+            mcp_servers = []
 
         return AgentPreset(
             name=name,
@@ -93,6 +115,8 @@ class AgentPresetLoader:
             model=meta.get("model", "default"),
             tools=tools,
             skills=meta.get("skills", []),
+            mcp_servers=mcp_servers,
+            subagents=meta.get("subagents", []),
             system_prompt=body,
             file_path=path,
         )

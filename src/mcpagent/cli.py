@@ -75,7 +75,7 @@ class CLI:
 
             # Slash commands
             if user_input.startswith("/"):
-                should_continue = self._handle_command(user_input.strip())
+                should_continue = await self._handle_command(user_input.strip())
                 if not should_continue:
                     break
                 continue
@@ -116,6 +116,12 @@ class CLI:
                         self.console.print(
                             f"  [bold yellow]📚 Loading skill:[/bold yellow] [bold]{skill_name}[/bold]"
                         )
+                    elif event.tool_name == "call_agent":
+                        agent_name = event.tool_args.get("name", "?")
+                        msg_preview = _truncate(event.tool_args.get("message", ""), 100)
+                        self.console.print(
+                            f"  [bold magenta]🤖 Calling agent:[/bold magenta] [bold]{agent_name}[/bold] — {msg_preview}"
+                        )
                     else:
                         args_str = _truncate(str(event.tool_args), 200)
                         self.console.print(
@@ -129,6 +135,9 @@ class CLI:
                             self.console.print(f"  [dim]→ already loaded[/dim]")
                         else:
                             self.console.print(f"  [bold yellow]→ loaded[/bold yellow]")
+                    elif event.tool_name == "call_agent":
+                        result_preview = _truncate(event.content, 500)
+                        self.console.print(f"  [bold magenta]→ {result_preview}[/bold magenta]")
                     else:
                         result_preview = _truncate(event.content, 300)
                         self.console.print(f"  [tool.result]→ {result_preview}[/tool.result]")
@@ -161,7 +170,7 @@ class CLI:
     # Slash commands
     # ------------------------------------------------------------------
 
-    def _handle_command(self, cmd: str) -> bool:
+    async def _handle_command(self, cmd: str) -> bool:
         """Handle a slash command. Returns False to exit the REPL."""
         parts = cmd.split(maxsplit=1)
         command = parts[0].lower()
@@ -197,7 +206,7 @@ class CLI:
             return True
 
         if command == "/agent":
-            self._cmd_agent_switch(arg)
+            await self._cmd_agent_switch(arg)
             return True
 
         if command == "/skills":
@@ -256,9 +265,19 @@ class CLI:
         for p in sorted(presets, key=lambda x: x.name):
             marker = " [agent.name]← active[/agent.name]" if p.name == active_name else ""
             desc = f" — {p.description}" if p.description else ""
-            self.console.print(f"  • [bold]{p.name}[/bold]{desc}{marker}")
+            # Show MCP servers config
+            if p.mcp_servers is None:
+                mcp_info = "all"
+            elif p.mcp_servers:
+                mcp_info = ", ".join(p.mcp_servers)
+            else:
+                mcp_info = "none"
+            extras = f" [dim](mcp: {mcp_info})[/dim]"
+            if p.subagents:
+                extras += f" [dim](subagents: {', '.join(p.subagents)})[/dim]"
+            self.console.print(f"  • [bold]{p.name}[/bold]{desc}{extras}{marker}")
 
-    def _cmd_agent_switch(self, name: str) -> None:
+    async def _cmd_agent_switch(self, name: str) -> None:
         if not name:
             # No argument — show current agent
             self.console.print(
@@ -267,8 +286,17 @@ class CLI:
             self.console.print("[info]Use /agent <name> to switch. /agents to list all.[/info]")
             return
 
-        result = self.agent.switch_preset(name)
+        self.console.print(f"[dim]Switching to agent '{name}'...[/dim]")
+        result = await self.agent.switch_preset(name)
         if result:
+            # Report MCP server state
+            if self.mcp:
+                servers = self.mcp.get_server_names()
+                if servers:
+                    srv_info = ", ".join(servers)
+                    self.console.print(f"[dim]  MCP servers active: {srv_info}[/dim]")
+                else:
+                    self.console.print("[dim]  No MCP servers active[/dim]")
             self.console.print(
                 f"[info]Switched to agent:[/info] [agent.name]{result}[/agent.name] "
                 f"(conversation cleared)"

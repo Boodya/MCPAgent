@@ -10,7 +10,6 @@ default_model: default
 
 agent:
   max_iterations: 30
-  system_prompt: ""
   # Context window management
   context_window: 128000       # model's context window in tokens
   summarize_threshold: 0.7     # auto-summarize at 70% of context window
@@ -21,31 +20,6 @@ storage:
   data_dir: "temp-memory"      # all data stored here: memories, chat history, logs
   chat_history: true           # save conversation history to data_dir/history/
   logs: true                   # save execution logs to data_dir/logs/
-
-# Built-in tools — toggle on/off, override descriptions, tune settings
-tools:
-  read_file:
-    enabled: true
-    max_size_kb: 512           # max file size to read without line range (KB)
-  write_file:
-    enabled: true
-  list_dir:
-    enabled: true
-  grep_search:
-    enabled: true
-    max_results: 200           # max matching lines returned
-  run_command:
-    enabled: true
-    timeout: 60                # command timeout (seconds)
-    confirm: false             # require user confirmation before executing
-  memory_view:
-    enabled: true
-  memory_create:
-    enabled: true
-  memory_update:
-    enabled: true
-  memory_delete:
-    enabled: true
 
 skills_dir: "skills"
 agents_dir: "agents"

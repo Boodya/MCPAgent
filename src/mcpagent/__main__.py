@@ -89,14 +89,6 @@ async def async_main() -> None:
     agent: Agent | None = None
 
     try:
-        if mcp_mgr:
-            server_names = ", ".join(config.mcp.servers.keys())
-            print(f"  Connecting MCP servers: {server_names} ...", end=" ", flush=True)
-            await mcp_mgr.__aenter__()
-            connected = len(mcp_mgr._connections)
-            total = len(config.mcp.servers)
-            print(f"done ({connected}/{total})")
-
         # --- Tools ---
         tools = ToolRegistry(memory=memory, mcp=mcp_mgr, tools_config=config.tools)
 
@@ -117,12 +109,31 @@ async def async_main() -> None:
                 agents_dir = candidate
         preset_loader = AgentPresetLoader(agents_dir)
 
+        # --- Start MCP servers for the default agent ---
+        if mcp_mgr:
+            default_preset = preset_loader.active
+            desired = default_preset.mcp_servers  # None = all
+            if desired is None:
+                server_label = "all"
+                server_names = ", ".join(config.mcp.servers.keys())
+            else:
+                server_label = f"{len(desired)} of {len(config.mcp.servers)}"
+                server_names = ", ".join(desired) if desired else "(none)"
+
+            if desired is None or desired:
+                print(f"  Connecting MCP servers ({server_label}): {server_names} ...", end=" ", flush=True)
+                started, _ = await mcp_mgr.ensure_servers(desired)
+                connected = len(mcp_mgr.get_server_names())
+                total = len(desired) if desired is not None else len(config.mcp.servers)
+                print(f"done ({connected}/{total})")
+
         # --- Agent ---
         agent = Agent(
             llm=llm, tools=tools, memory=memory,
             config=config.agent, storage=storage,
             preset_loader=preset_loader,
             skill_loader=skill_loader,
+            mcp_manager=mcp_mgr,
         )
 
         # --- CLI ---
@@ -141,7 +152,7 @@ async def async_main() -> None:
 
         if mcp_mgr:
             try:
-                await mcp_mgr.__aexit__(None, None, None)
+                await mcp_mgr.shutdown()
             except (RuntimeError, BaseExceptionGroup, Exception):
                 # MCP SDK uses anyio task groups that can raise RuntimeError
                 # ("Attempted to exit cancel scope in a different task")

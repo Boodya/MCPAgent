@@ -12,3 +12,4 @@ venv/
 memories/session/
 .mcpagent/
 temp-memory/
+tests-results/

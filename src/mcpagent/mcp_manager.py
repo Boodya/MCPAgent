@@ -1,4 +1,7 @@
-"""MCP Client Manager — lifecycle, tool discovery, and tool dispatch for MCP servers."""
+"""MCP Client Manager — lifecycle, tool discovery, and tool dispatch for MCP servers.
+
+Supports per-agent selective start/stop with connection pooling.
+"""
 
 from __future__ import annotations
 
@@ -25,116 +28,185 @@ class ServerConnection:
     name: str
     config: McpServerConfig
     session: ClientSession
+    exit_stack: AsyncExitStack  # per-server stack for independent lifecycle
     tools: list[dict[str, Any]] = field(default_factory=list)
 
 
 class MCPManager:
-    """Manages connections to all MCP servers defined in config.
+    """Manages connections to MCP servers with selective start/stop.
+
+    Supports per-agent server sets: start only what the agent needs,
+    stop what it doesn't, keep shared servers running.
 
     Usage::
 
-        async with MCPManager(servers_config) as mgr:
-            tools = mgr.get_all_tools_openai()
-            result = await mgr.call_tool("server__tool_name", {"arg": "val"})
+        mgr = MCPManager(servers_config)
+        await mgr.ensure_servers(["server-a", "server-b"])  # start needed
+        await mgr.ensure_servers(["server-b"])               # stops server-a, keeps b
+        await mgr.shutdown()                                  # stop all
     """
 
     def __init__(self, servers: dict[str, McpServerConfig]) -> None:
         self._server_configs = servers
         self._connections: dict[str, ServerConnection] = {}
-        self._exit_stack = AsyncExitStack()
         # Mapping from qualified tool name → (server_name, original_tool_name)
         self._tool_map: dict[str, tuple[str, str]] = {}
 
     # ------------------------------------------------------------------
-    # Async context manager
+    # Lifecycle — selective start/stop
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> MCPManager:
-        await self._exit_stack.__aenter__()
-        await self.start_all()
-        return self
+    async def ensure_servers(self, desired: list[str] | None) -> tuple[list[str], list[str]]:
+        """Bring running servers in sync with *desired* list.
 
-    async def __aexit__(self, *exc: Any) -> None:
-        await self._exit_stack.__aexit__(*exc)
-        self._connections.clear()
-        self._tool_map.clear()
+        Args:
+            desired: server names to have running.
+                     None means ALL servers from config.
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+        Returns:
+            (started, stopped) — names of servers that changed state.
+        """
+        if desired is None:
+            desired_set = set(self._server_configs.keys())
+        else:
+            # Only keep names that exist in the config registry
+            desired_set = {n for n in desired if n in self._server_configs}
 
-    async def start_all(self) -> None:
-        """Connect to every server defined in config (in parallel)."""
+        running = set(self._connections.keys())
 
-        async def _safe_start(name: str, cfg: McpServerConfig) -> None:
+        to_start = desired_set - running
+        to_stop = running - desired_set
+
+        stopped: list[str] = []
+        if to_stop:
+            stopped = await self._stop_servers(list(to_stop))
+
+        started: list[str] = []
+        if to_start:
+            started = await self._start_servers(list(to_start))
+
+        return started, stopped
+
+    async def _start_servers(self, names: list[str]) -> list[str]:
+        """Start specific servers in parallel. Returns names that started successfully."""
+        started: list[str] = []
+        lock = asyncio.Lock()
+
+        async def _safe_start(name: str) -> None:
+            cfg = self._server_configs.get(name)
+            if not cfg:
+                log.warning("MCP server '%s' not found in config, skipping", name)
+                return
             try:
                 await self._start_server(name, cfg)
+                async with lock:
+                    started.append(name)
                 log.info("MCP server '%s' connected (%d tools)", name, len(self._connections[name].tools))
             except Exception:
                 log.exception("Failed to start MCP server '%s'", name)
 
-        await asyncio.gather(*[
-            _safe_start(name, cfg)
-            for name, cfg in self._server_configs.items()
-        ])
+        await asyncio.gather(*[_safe_start(n) for n in names])
+        return started
+
+    async def _stop_servers(self, names: list[str]) -> list[str]:
+        """Stop specific servers. Returns names that were stopped."""
+        stopped: list[str] = []
+        for name in names:
+            conn = self._connections.pop(name, None)
+            if not conn:
+                continue
+            # Remove tools from tool_map
+            to_remove = [qn for qn, (sn, _) in self._tool_map.items() if sn == name]
+            for qn in to_remove:
+                del self._tool_map[qn]
+            # Tear down server's exit stack
+            try:
+                await conn.exit_stack.__aexit__(None, None, None)
+            except (RuntimeError, BaseExceptionGroup, Exception):
+                pass  # MCP/anyio shutdown quirks
+            stopped.append(name)
+            log.info("MCP server '%s' stopped", name)
+        return stopped
+
+    async def start_all(self) -> None:
+        """Connect to every server in config (in parallel). Convenience for startup."""
+        await self.ensure_servers(None)
+
+    async def shutdown(self) -> None:
+        """Stop all running servers."""
+        names = list(self._connections.keys())
+        if names:
+            await self._stop_servers(names)
 
     async def _start_server(self, name: str, cfg: McpServerConfig) -> None:
-        if cfg.type == "stdio":
-            if not cfg.command:
-                raise ValueError(f"MCP server '{name}': stdio type requires 'command'")
+        stack = AsyncExitStack()
+        await stack.__aenter__()
 
-            params = StdioServerParameters(
-                command=cfg.command,
-                args=cfg.args,
-                env={**cfg.env} if cfg.env else None,
+        try:
+            if cfg.type == "stdio":
+                if not cfg.command:
+                    raise ValueError(f"MCP server '{name}': stdio type requires 'command'")
+
+                params = StdioServerParameters(
+                    command=cfg.command,
+                    args=cfg.args,
+                    env={**cfg.env} if cfg.env else None,
+                )
+                transport = await stack.enter_async_context(stdio_client(params))
+
+            elif cfg.type in ("http", "sse", "streamable-http"):
+                if not cfg.url:
+                    raise ValueError(f"MCP server '{name}': http type requires 'url'")
+                transport = await stack.enter_async_context(
+                    streamable_http_client(cfg.url)
+                )
+            else:
+                raise ValueError(f"Unknown MCP transport type: {cfg.type}")
+
+            # transport is (read_stream, write_stream) or (read, write, session_getter)
+            if len(transport) == 3:
+                read, write, _ = transport
+            else:
+                read, write = transport
+
+            session: ClientSession = await stack.enter_async_context(
+                ClientSession(read, write)
             )
-            transport = await self._exit_stack.enter_async_context(stdio_client(params))
+            await session.initialize()
 
-        elif cfg.type in ("http", "sse", "streamable-http"):
-            if not cfg.url:
-                raise ValueError(f"MCP server '{name}': http type requires 'url'")
-            transport = await self._exit_stack.enter_async_context(
-                streamable_http_client(cfg.url)
-            )
-        else:
-            raise ValueError(f"Unknown MCP transport type: {cfg.type}")
+            # Discover tools
+            tools_response = await session.list_tools()
+            raw_tools = tools_response.tools if hasattr(tools_response, "tools") else tools_response
 
-        # transport is (read_stream, write_stream) or (read, write, session_getter)
-        if len(transport) == 3:
-            read, write, _ = transport
-        else:
-            read, write = transport
+            conn = ServerConnection(name=name, config=cfg, session=session, exit_stack=stack)
 
-        session: ClientSession = await self._exit_stack.enter_async_context(
-            ClientSession(read, write)
-        )
-        await session.initialize()
+            for tool in raw_tools:
+                tool_name = tool.name
+                qualified = f"{name}__{tool_name}"
+                self._tool_map[qualified] = (name, tool_name)
+                conn.tools.append({
+                    "qualified_name": qualified,
+                    "name": tool_name,
+                    "description": getattr(tool, "description", "") or "",
+                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                })
 
-        # Discover tools
-        tools_response = await session.list_tools()
-        raw_tools = tools_response.tools if hasattr(tools_response, "tools") else tools_response
+            self._connections[name] = conn
 
-        conn = ServerConnection(name=name, config=cfg, session=session)
-
-        for tool in raw_tools:
-            tool_name = tool.name
-            qualified = f"{name}__{tool_name}"
-            self._tool_map[qualified] = (name, tool_name)
-            conn.tools.append({
-                "qualified_name": qualified,
-                "name": tool_name,
-                "description": getattr(tool, "description", "") or "",
-                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-            })
-
-        self._connections[name] = conn
+        except Exception:
+            # Clean up the stack if server failed to start
+            try:
+                await stack.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Tool discovery
     # ------------------------------------------------------------------
 
     def get_all_tools_openai(self) -> list[dict[str, Any]]:
-        """Return all MCP tools in OpenAI function-calling format."""
+        """Return all MCP tools from currently connected servers in OpenAI format."""
         tools: list[dict[str, Any]] = []
         for conn in self._connections.values():
             for t in conn.tools:
@@ -151,7 +223,12 @@ class MCPManager:
         return tools
 
     def get_server_names(self) -> list[str]:
+        """Return names of currently connected servers."""
         return list(self._connections.keys())
+
+    def get_available_server_names(self) -> list[str]:
+        """Return names of all configured servers (whether connected or not)."""
+        return list(self._server_configs.keys())
 
     def get_server_tool_count(self, name: str) -> int:
         conn = self._connections.get(name)

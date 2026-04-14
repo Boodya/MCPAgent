@@ -115,7 +115,7 @@ class AppConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     skills_dir: str = "skills"
     agents_dir: str = "agents"
-    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)  # kept for backward compat; defaults are fine
     mcp: McpConfig = Field(default_factory=McpConfig)
 
 
