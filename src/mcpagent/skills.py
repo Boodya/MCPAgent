@@ -71,24 +71,38 @@ class SkillLoader:
     def match(self, user_query: str) -> list[Skill]:
         """Return skills whose triggers or description match the user query."""
         query_lower = user_query.lower()
+        query_words = set(re.findall(r'[a-zA-Zа-яА-ЯёЁ]+', query_lower))
         matched: list[Skill] = []
 
         for skill in self.skills:
-            # Check triggers
-            for trigger in skill.triggers:
-                if trigger.lower() in query_lower:
-                    matched.append(skill)
-                    break
-            else:
-                # Check description keywords
-                if skill.description:
-                    desc_words = skill.description.lower().split()
-                    # Match if a significant portion of description words appear in query
-                    hits = sum(1 for w in desc_words if len(w) > 3 and w in query_lower)
-                    if hits >= 2:
-                        matched.append(skill)
+            if self._skill_matches(skill, query_lower, query_words):
+                matched.append(skill)
 
         return matched
+
+    @staticmethod
+    def _skill_matches(skill: Skill, query_lower: str, query_words: set[str]) -> bool:
+        """Check if a skill matches the user query via triggers or description."""
+        for trigger in skill.triggers:
+            trigger_lower = trigger.lower()
+            # Exact substring match (e.g. "review code" in "please review code for me")
+            if trigger_lower in query_lower:
+                return True
+            # Word-level match: all significant trigger words present in query
+            trigger_words = set(re.findall(r'[a-zA-Zа-яА-ЯёЁ]+', trigger_lower))
+            significant = {w for w in trigger_words if len(w) > 2}
+            if significant and significant.issubset(query_words):
+                return True
+
+        # Fallback: description keyword matching
+        if skill.description:
+            desc_words = set(re.findall(r'[a-zA-Zа-яА-ЯёЁ]+', skill.description.lower()))
+            significant_desc = {w for w in desc_words if len(w) > 3}
+            hits = len(significant_desc & query_words)
+            if hits >= 2:
+                return True
+
+        return False
 
     def load_content(self, skill: Skill) -> str:
         """Lazily load the full content of a skill file."""

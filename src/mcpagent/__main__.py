@@ -102,10 +102,19 @@ async def async_main() -> None:
 
         # --- Skills ---
         skills_dir = Path(config.skills_dir)
+        if not skills_dir.is_absolute():
+            # Try relative to config dir first, then CWD
+            candidate = config_dir.parent / config.skills_dir
+            if candidate.is_dir():
+                skills_dir = candidate
         skill_loader = SkillLoader(skills_dir)
 
         # --- Agent Presets ---
         agents_dir = Path(config.agents_dir)
+        if not agents_dir.is_absolute():
+            candidate = config_dir.parent / config.agents_dir
+            if candidate.is_dir():
+                agents_dir = candidate
         preset_loader = AgentPresetLoader(agents_dir)
 
         # --- Agent ---

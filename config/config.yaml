@@ -11,6 +11,11 @@ default_model: default
 agent:
   max_iterations: 30
   system_prompt: ""
+  # Context window management
+  context_window: 128000       # model's context window in tokens
+  summarize_threshold: 0.7     # auto-summarize at 70% of context window
+  max_tool_result_tokens: 8000 # truncate tool results beyond this
+  summary_max_tokens: 1000     # max tokens for the summary
 
 storage:
   data_dir: "temp-memory"      # all data stored here: memories, chat history, logs

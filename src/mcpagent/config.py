@@ -42,6 +42,12 @@ class AgentConfig(BaseModel):
     max_iterations: int = 30
     model: str = "default"
 
+    # Context window management
+    context_window: int = 128_000          # model context window size in tokens
+    summarize_threshold: float = 0.7       # trigger summarization at this % of context_window
+    max_tool_result_tokens: int = 8_000    # truncate individual tool results beyond this
+    summary_max_tokens: int = 1_000        # max tokens for the generated summary
+
 
 class BuiltinToolConfig(BaseModel):
     """Configuration for a single built-in tool."""

@@ -126,6 +126,12 @@ class CLI:
                     result_preview = _truncate(event.content, 300)
                     self.console.print(f"  [tool.result]→ {result_preview}[/tool.result]")
 
+                elif event.type == "context_summarizing":
+                    self.console.print(f"[bold blue]📝 {event.content}[/bold blue]")
+
+                elif event.type == "context_summarized":
+                    self.console.print(f"[bold blue]✓ {event.content}[/bold blue]")
+
                 elif event.type == "error":
                     self.console.print(f"[error]Error: {event.content}[/error]")
 
@@ -191,6 +197,10 @@ class CLI:
             self._cmd_skills()
             return True
 
+        if command == "/context":
+            self._cmd_context()
+            return True
+
         self.console.print(f"[error]Unknown command: {command}. Type /help[/error]")
         return True
 
@@ -208,7 +218,8 @@ class CLI:
             "/memory         — Show memory directories\n"
             "/agents         — List available agent presets\n"
             "/agent <name>   — Switch to a different agent preset\n"
-            "/skills         — List available skills",
+            "/skills         — List available skills\n"
+            "/context        — Show context window usage",
             title="Commands",
         ))
 
@@ -274,6 +285,37 @@ class CLI:
             triggers = f" [dim](triggers: {', '.join(s.triggers)})[/dim]" if s.triggers else ""
             self.console.print(f"  • [bold]{s.name}[/bold]{desc}{triggers}")
 
+    def _cmd_context(self) -> None:
+        """Show context window usage stats."""
+        ctx = self.agent.ctx
+        # Recount tokens fresh
+        ctx.count_tokens(self.agent.messages)
+        stats = ctx.get_stats()
+
+        bar_width = 30
+        filled = int(bar_width * stats["usage_pct"] / 100)
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        color = "green"
+        if stats["usage_pct"] > 70:
+            color = "yellow"
+        if stats["usage_pct"] > 90:
+            color = "red"
+
+        self.console.print(f"[info]Context window:[/info]")
+        self.console.print(
+            f"  [{color}]{bar}[/{color}] "
+            f"{stats['tokens']:,} / {stats['context_window']:,} tokens "
+            f"({stats['usage_pct']}%)"
+        )
+        self.console.print(f"  Messages: {len(self.agent.messages)}")
+        self.console.print(
+            f"  Summarization threshold: {stats['threshold']:,} tokens "
+            f"({int(ctx.summarize_threshold * 100)}%)"
+        )
+        if stats["summarizations"] > 0:
+            self.console.print(f"  Summarizations performed: {stats['summarizations']}")
+
     # ------------------------------------------------------------------
     # Status display
     # ------------------------------------------------------------------
@@ -306,7 +348,9 @@ class CLI:
         if self.skill_loader:
             skill_count = len(self.skill_loader.get_all())
             if skill_count:
-                self.console.print(f"[info]Skills: {skill_count}[/info]")
+                self.console.print(f"[info]Skills: {skill_count}[/info] (from {self.skill_loader.skills_dir})")
+            else:
+                self.console.print(f"[info]Skills: 0[/info] [dim](dir: {self.skill_loader.skills_dir})[/dim]")
 
         # Agent presets summary
         if self.agent.preset_loader:

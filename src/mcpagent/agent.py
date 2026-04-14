@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator
 
 from mcpagent.agent_presets import AgentPreset, AgentPresetLoader
 from mcpagent.config import AgentConfig
+from mcpagent.context import ContextManager
 from mcpagent.llm import LLMClient
 from mcpagent.memory import MemoryManager
 from mcpagent.skills import Skill, SkillLoader
@@ -84,6 +85,15 @@ class Agent:
         self.preset_loader = preset_loader
         self.skill_loader = skill_loader
         self.messages: list[dict[str, Any]] = []
+
+        # Context window management
+        self.ctx = ContextManager(
+            context_window=self.config.context_window,
+            summarize_threshold=self.config.summarize_threshold,
+            max_tool_result_tokens=self.config.max_tool_result_tokens,
+            summary_max_tokens=self.config.summary_max_tokens,
+        )
+
         self._init_system_prompt()
 
     @property
@@ -161,6 +171,15 @@ class Agent:
 
         for iteration in range(self.config.max_iterations):
             log.debug("Agent iteration %d", iteration + 1)
+
+            # --- Context window management: summarize if needed ---
+            if self.ctx.needs_summarization(self.messages):
+                yield AgentEvent(type="context_summarizing", content="Summarizing conversation history...")
+                self.messages = await self.ctx.maybe_summarize(self.messages, self.llm)
+                yield AgentEvent(
+                    type="context_summarized",
+                    content=f"Context compressed (summarization #{self.ctx.summarization_count})",
+                )
 
             # --- Call LLM (streaming) ---
             stream = await self.llm.chat(self.messages, tools=openai_tools or None)
@@ -249,11 +268,12 @@ class Agent:
                             result_length=len(result),
                         )
 
-                    # Add tool result to messages
+                    # Add tool result to messages (truncated if too large)
+                    truncated_result = self.ctx.truncate_tool_result(result)
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": call.id,
-                        "content": result,
+                        "content": truncated_result,
                     })
 
                 # Continue to next iteration (LLM will see tool results)
@@ -286,9 +306,12 @@ class Agent:
     def _match_and_inject_skills(self, user_message: str) -> list[Skill]:
         """Match user message against available skills, inject content as system context."""
         if not self.skill_loader:
+            log.debug("No skill_loader configured")
             return []
 
         matched = self.skill_loader.match(user_message)
+        log.debug("Skill matching for %r: %d matched out of %d total",
+                   user_message[:80], len(matched), len(self.skill_loader.skills))
         if not matched:
             return []
 

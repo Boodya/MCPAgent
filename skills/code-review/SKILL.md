@@ -5,6 +5,8 @@ triggers:
   - review code
   - code review
   - review this
+  - review file
+  - review the
   - check code
   - find bugs
   - security review
