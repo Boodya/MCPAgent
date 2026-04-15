@@ -6,7 +6,12 @@ import json
 import logging
 from typing import Any
 
-import tiktoken
+try:
+    import tiktoken as _tiktoken
+    _TIKTOKEN_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _tiktoken = None  # type: ignore[assignment]
+    _TIKTOKEN_AVAILABLE = False
 
 log = logging.getLogger(__name__)
 
@@ -15,23 +20,28 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Cache encoder per model to avoid repeated initialization
-_ENCODER_CACHE: dict[str, tiktoken.Encoding] = {}
+_ENCODER_CACHE: dict = {}
 
 
-def _get_encoder(model: str = "gpt-4o") -> tiktoken.Encoding:
+def _get_encoder(model: str = "gpt-4o"):
     """Get (or cache) a tiktoken encoder for the given model."""
+    if not _TIKTOKEN_AVAILABLE:
+        return None
     if model not in _ENCODER_CACHE:
         try:
-            _ENCODER_CACHE[model] = tiktoken.encoding_for_model(model)
+            _ENCODER_CACHE[model] = _tiktoken.encoding_for_model(model)
         except KeyError:
             # Fallback to cl100k_base (covers GPT-4, GPT-4o, GPT-3.5-turbo)
-            _ENCODER_CACHE[model] = tiktoken.get_encoding("cl100k_base")
+            _ENCODER_CACHE[model] = _tiktoken.get_encoding("cl100k_base")
     return _ENCODER_CACHE[model]
 
 
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
     """Count tokens in a string."""
     enc = _get_encoder(model)
+    if enc is None:
+        # Approximate: ~4 chars per token
+        return len(text) // 4
     return len(enc.encode(text))
 
 
@@ -51,25 +61,27 @@ def count_message_tokens(messages: list[dict[str, Any]], model: str = "gpt-4o") 
 
         # role
         role = msg.get("role", "")
-        total += len(enc.encode(role))
+        total += len(enc.encode(role)) if enc else len(role) // 4
 
         # content
         content = msg.get("content") or ""
         if isinstance(content, str):
-            total += len(enc.encode(content))
+            total += len(enc.encode(content)) if enc else len(content) // 4
         elif isinstance(content, list):
             # Multi-part content (text + images etc.)
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
-                    total += len(enc.encode(part.get("text", "")))
+                    text = part.get("text", "")
+                    total += len(enc.encode(text)) if enc else len(text) // 4
 
         # name (if present)
         if name := msg.get("name"):
-            total += len(enc.encode(name)) + 1
+            total += (len(enc.encode(name)) if enc else len(name) // 4) + 1
 
         # tool_calls (assistant message with function calls)
         if tool_calls := msg.get("tool_calls"):
-            total += len(enc.encode(json.dumps(tool_calls, ensure_ascii=False)))
+            tc_str = json.dumps(tool_calls, ensure_ascii=False)
+            total += len(enc.encode(tc_str)) if enc else len(tc_str) // 4
 
     total += 3  # reply priming
     return total
@@ -93,10 +105,15 @@ def truncate_tool_result(result: str, max_tokens: int, model: str = "gpt-4o") ->
         return result
 
     enc = _get_encoder(model)
-    tokens = enc.encode(result)
-    # Leave room for the truncation notice (~30 tokens)
-    truncated_tokens = tokens[: max_tokens - 30]
-    truncated_text = enc.decode(truncated_tokens)
+    if enc is None:
+        # Approximate truncation without tiktoken
+        approx_chars = (max_tokens - 30) * 4
+        truncated_text = result[:approx_chars]
+    else:
+        tokens = enc.encode(result)
+        # Leave room for the truncation notice (~30 tokens)
+        truncated_tokens = tokens[: max_tokens - 30]
+        truncated_text = enc.decode(truncated_tokens)
 
     notice = (
         f"\n\n... [TRUNCATED: showing ~{max_tokens} of {token_count} tokens. "
