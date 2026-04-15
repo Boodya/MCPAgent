@@ -173,9 +173,16 @@ class Agent:
                 )
 
         # Inject available subagents so the LLM knows valid call_agent targets
-        if preset and preset.subagents and self.preset_loader:
+        _has_subagents = preset and (preset.subagents is None or preset.subagents) and self.preset_loader
+        if _has_subagents:
             agent_lines = []
-            for agent_name in preset.subagents:
+            # subagents=None means all agents; list means specific names
+            target_names = (
+                [n for n in self.preset_loader.get_names() if n != preset.name]
+                if preset.subagents is None
+                else preset.subagents
+            )
+            for agent_name in target_names:
                 target = self.preset_loader.presets.get(agent_name)
                 if target:
                     desc = f" — {target.description}" if target.description else ""
@@ -508,8 +515,11 @@ class Agent:
         if not self.preset_loader:
             return
 
-        # Check if any agent defines subagents
-        has_subagents = any(p.subagents for p in self.preset_loader.get_all())
+        # Check if any agent defines subagents (None = all, non-empty list = specific)
+        has_subagents = any(
+            p.subagents is None or p.subagents
+            for p in self.preset_loader.get_all()
+        )
         if not has_subagents:
             return
 
@@ -543,7 +553,8 @@ class Agent:
 
         # Check if current agent is allowed to call this sub-agent
         current = self.active_preset
-        if current and name not in (current.subagents or []):
+        # subagents=None means all allowed; otherwise check explicit list
+        if current and current.subagents is not None and name not in (current.subagents or []):
             return json.dumps({
                 "error": f"Agent '{self.active_agent_name}' cannot call sub-agent '{name}'. "
                          f"Allowed subagents: {current.subagents}"

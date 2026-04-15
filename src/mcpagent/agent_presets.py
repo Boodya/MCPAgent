@@ -11,6 +11,21 @@ import yaml
 _SENTINEL = object()  # distinguish "key missing" from "key: null" in YAML
 
 
+def _parse_all_or_list(meta: dict, key: str) -> list[str] | None:
+    """Parse a YAML field that can be 'all', a list, or absent.
+
+    Returns None for 'all' (meaning all available), [] if absent, list otherwise.
+    """
+    val = meta.get(key, _SENTINEL)
+    if val is _SENTINEL:
+        return []
+    if val == "all":
+        return None
+    if isinstance(val, list):
+        return val
+    return []
+
+
 @dataclass
 class AgentPreset:
     """A loaded agent preset definition."""
@@ -21,7 +36,7 @@ class AgentPreset:
     tools: list[str] | None = None  # None = all tools; list = filter
     skills: list[str] = field(default_factory=list)
     mcp_servers: list[str] | None = None  # None = all servers; list = filter by name
-    subagents: list[str] = field(default_factory=list)
+    subagents: list[str] | None = field(default_factory=list)  # None = all agents
     system_prompt: str = ""
     file_path: Path = field(default_factory=lambda: Path())
 
@@ -34,7 +49,7 @@ _BUILTIN_DEFAULT = AgentPreset(
     tools=None,
     skills=[],
     mcp_servers=None,
-    subagents=[],
+    subagents=[],  # empty list = no subagents; None = all
     system_prompt="",  # empty = use DEFAULT_SYSTEM_PROMPT from agent.py
 )
 
@@ -116,7 +131,7 @@ class AgentPresetLoader:
             tools=tools,
             skills=meta.get("skills", []),
             mcp_servers=mcp_servers,
-            subagents=meta.get("subagents", []),
+            subagents=_parse_all_or_list(meta, "subagents"),
             system_prompt=body,
             file_path=path,
         )
