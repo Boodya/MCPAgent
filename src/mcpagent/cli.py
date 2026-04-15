@@ -134,6 +134,13 @@ class CLI:
                 )
                 await self._run_agent(notification)
 
+                # The original input() call is still blocking in its thread.
+                # Re-display the prompt so the user sees it immediately
+                # after the agent's response — their next keypress will be
+                # captured by the already-waiting input().
+                agent_name = self.agent.active_agent_name
+                print(f"\n[{agent_name}] > ", end="", flush=True)
+
         return input_future.result()
 
     def _get_input(self) -> str:
