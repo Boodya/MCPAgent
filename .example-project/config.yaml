@@ -6,6 +6,15 @@ models:
   default:
     provider: azure
 
+  # NVIDIA NIM (self-hosted or build.nvidia.com hosted API)
+  # Uncomment and set NVIDIA_API_KEY in .env to use
+  # nvidia-kimi:
+  #   provider: nvidia
+  #   endpoint: https://integrate.api.nvidia.com/v1   # hosted API
+  #   # endpoint: http://localhost:8000/v1            # self-hosted NIM
+  #   model_name: moonshotai/kimi-k2.5
+  #   max_tokens: 8192
+
 default_model: default
 default_agent: architect          # agent preset to activate on startup (must match name in agents/*.md)
 

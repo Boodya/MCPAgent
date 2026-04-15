@@ -17,11 +17,19 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class ModelConfig(BaseModel):
-    """Azure OpenAI model configuration."""
+    """LLM model configuration.
+
+    provider="azure"  — Azure OpenAI (uses AZURE_OPENAI_API_KEY by default)
+    provider="nvidia" — NVIDIA NIM (uses NVIDIA_API_KEY by default)
+    provider="openai" — OpenAI API (uses OPENAI_API_KEY by default)
+    Any other value   — OpenAI-compatible endpoint; set endpoint + api_key_env.
+    """
 
     provider: str = "azure"
-    endpoint: str = ""
-    deployment: str = ""
+    endpoint: str = ""           # base_url for openai-compat; azure_endpoint for Azure
+    deployment: str = ""         # Azure deployment name (Azure only)
+    model_name: str = ""         # model name for non-Azure providers
+    api_key_env: str = ""        # env var to read API key from (auto-detected if empty)
     api_version: str = "2024-12-01-preview"
     max_tokens: int = 4096
     temperature: float = 0.1
@@ -242,17 +250,20 @@ def load_mcp_config(path: str | Path) -> McpConfig:
 
 
 def _env_override_model(cfg: ModelConfig) -> ModelConfig:
-    """Override ModelConfig fields from environment variables."""
-    if v := os.environ.get("AZURE_OPENAI_ENDPOINT"):
-        cfg.endpoint = v
-    if v := os.environ.get("AZURE_OPENAI_DEPLOYMENT"):
-        cfg.deployment = v
-    if v := os.environ.get("AZURE_OPENAI_API_VERSION"):
-        cfg.api_version = v
-    if v := os.environ.get("AZURE_OPENAI_MAX_TOKENS"):
-        cfg.max_tokens = int(v)
-    if v := os.environ.get("AZURE_OPENAI_TEMPERATURE"):
-        cfg.temperature = float(v)
+    """Override ModelConfig fields from environment variables.
+    Azure-specific env vars are only applied to Azure provider models.
+    """
+    if cfg.provider == "azure":
+        if v := os.environ.get("AZURE_OPENAI_ENDPOINT"):
+            cfg.endpoint = v
+        if v := os.environ.get("AZURE_OPENAI_DEPLOYMENT"):
+            cfg.deployment = v
+        if v := os.environ.get("AZURE_OPENAI_API_VERSION"):
+            cfg.api_version = v
+        if v := os.environ.get("AZURE_OPENAI_MAX_TOKENS"):
+            cfg.max_tokens = int(v)
+        if v := os.environ.get("AZURE_OPENAI_TEMPERATURE"):
+            cfg.temperature = float(v)
     return cfg
 
 

@@ -1,4 +1,5 @@
-"""Azure OpenAI LLM client with streaming and retry logic."""
+"""LLM client with streaming and retry logic. Supports Azure OpenAI and any
+OpenAI-compatible provider (NVIDIA NIM, OpenAI, etc.)."""
 
 from __future__ import annotations
 
@@ -7,32 +8,60 @@ import logging
 import os
 from typing import Any, AsyncIterator
 
-from openai import AsyncAzureOpenAI, APIStatusError
+from openai import AsyncAzureOpenAI, AsyncOpenAI, APIStatusError
 
 from mcpagent.config import ModelConfig
 from mcpagent.ops_log import OpsLog
 
 log = logging.getLogger(__name__)
 
+_PROVIDER_KEY_ENV: dict[str, str] = {
+    "azure": "AZURE_OPENAI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
+}
+
+
+def _default_key_env(provider: str) -> str:
+    return _PROVIDER_KEY_ENV.get(provider, f"{provider.upper()}_API_KEY")
+
 
 class LLMClient:
-    """Thin async wrapper around Azure OpenAI Chat Completions."""
+    """Thin async wrapper around OpenAI Chat Completions.
+
+    Supports:
+    - provider=azure  — Azure OpenAI (default)
+    - provider=openai — OpenAI API
+    - provider=nvidia (or any other) — OpenAI-compatible endpoint via base_url
+    """
 
     def __init__(self, config: ModelConfig, *, ops: OpsLog | None = None) -> None:
         self.config = config
         self.ops = ops or OpsLog(None)
-        api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
+
+        # Resolve API key: use api_key_env if specified, else provider defaults
+        key_env = config.api_key_env or _default_key_env(config.provider)
+        api_key = os.environ.get(key_env, "")
         if not api_key:
             raise ValueError(
-                "Environment variable AZURE_OPENAI_API_KEY is not set. "
+                f"Environment variable {key_env} is not set. "
                 "Please set it in your .env file or environment."
             )
-        self._client = AsyncAzureOpenAI(
-            azure_endpoint=config.endpoint,
-            api_key=api_key,
-            api_version=config.api_version,
-        )
-        self.deployment = config.deployment
+
+        if config.provider == "azure":
+            self._client: AsyncAzureOpenAI | AsyncOpenAI = AsyncAzureOpenAI(
+                azure_endpoint=config.endpoint,
+                api_key=api_key,
+                api_version=config.api_version,
+            )
+        else:
+            # OpenAI-compatible: OpenAI, NVIDIA NIM, local, etc.
+            client_kwargs: dict[str, Any] = {"api_key": api_key}
+            if config.endpoint:
+                client_kwargs["base_url"] = config.endpoint
+            self._client = AsyncOpenAI(**client_kwargs)
+
+        self.deployment = config.deployment or config.model_name
 
     # ------------------------------------------------------------------
     # Streaming chat
