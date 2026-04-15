@@ -238,6 +238,9 @@ class CLI:
             return True
 
         if command == "/clear":
+            if self.storage:
+                self.storage.save_chat(self.agent.messages)
+                self.storage.write_event("conversation_cleared")
             self.agent.clear_history()
             self.console.print("[info]Conversation cleared.[/info]")
             return True
@@ -367,6 +370,16 @@ class CLI:
             return
 
         self.console.print(f"[dim]Switching to agent '{name}'...[/dim]")
+
+        # Flush current conversation before clearing it
+        if self.storage:
+            self.storage.save_chat(self.agent.messages)
+            self.storage.write_event(
+                "agent_switch",
+                from_agent=self.agent.active_agent_name,
+                to_agent=name,
+            )
+
         result = await self.agent.switch_preset(name)
         if result:
             # Report MCP server state

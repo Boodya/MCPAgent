@@ -7,7 +7,7 @@ models:
     provider: azure
 
 default_model: default
-default_agent: assistant          # agent preset to activate on startup (must match name in agents/*.md)
+default_agent: architect          # agent preset to activate on startup (must match name in agents/*.md)
 
 agent:
   max_iterations: 30
@@ -18,10 +18,10 @@ agent:
   summary_max_tokens: 1000     # max tokens for the summary
 
 storage:
-  data_dir: ".local-assistants"      # all data stored here: memories, chat history, logs
+  data_dir: ""      # all data stored here: memories, chat history, logs
   chat_history: true           # save conversation history to data_dir/history/
   logs: true                   # save execution logs to data_dir/logs/
 
-skills_dir: ".local-assistants/skills"
-agents_dir: ".local-assistants/agents"
-workflows_dir: ".local-assistants/workflows"
+skills_dir: "skills"
+agents_dir: "agents"
+workflows_dir: "workflows"

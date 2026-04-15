@@ -583,6 +583,24 @@ class Agent:
             {"role": "user", "content": message},
         ]
 
+        # Ensure MCP servers required by the sub-agent are running.
+        # We merge the sub-agent's servers with currently running ones so
+        # the parent's connections are not torn down.
+        parent_servers: list[str] | None = None
+        if self.mcp_manager and preset.mcp_servers is not None:
+            running = set(self.mcp_manager.get_server_names())
+            parent_servers = list(running)  # snapshot for restore
+            desired = running | set(preset.mcp_servers)
+            started, _ = await self.mcp_manager.ensure_servers(list(desired))
+            if started:
+                log.info("Started MCP servers for sub-agent '%s': %s", name, started)
+        elif self.mcp_manager and preset.mcp_servers is None:
+            # sub-agent wants ALL servers
+            parent_servers = list(self.mcp_manager.get_server_names())
+            started, _ = await self.mcp_manager.ensure_servers(None)
+            if started:
+                log.info("Started MCP servers for sub-agent '%s': %s", name, started)
+
         # Sub-agent uses the same tool registry and MCP connections
         # but respects its own tool filter
         openai_tools = self.tools.to_openai_tools(allowed=preset.tools)
@@ -654,6 +672,21 @@ class Agent:
 
         if not final_text:
             final_text = "(Sub-agent did not produce a final response)"
+
+        # Restore parent's MCP server set (stop servers the parent didn't need)
+        if self.mcp_manager and parent_servers is not None:
+            current_parent = self.active_preset
+            restore_set = current_parent.mcp_servers if current_parent else parent_servers
+            _, stopped = await self.mcp_manager.ensure_servers(restore_set)
+            if stopped:
+                log.info("Restored MCP servers after sub-agent '%s', stopped: %s", name, stopped)
+
+        # Persist the sub-agent conversation to chat history
+        if self.storage:
+            self.storage.write_event("sub_agent_call", agent=name, message=message)
+            sub_msgs = [m for m in messages if m.get("role") != "system"]
+            self.storage.write_sub_agent_messages(name, sub_msgs)
+            self.storage.write_event("sub_agent_done", agent=name)
 
         log.info("Sub-agent '%s' completed", name)
         return f"[Sub-agent: {name}]\n{final_text}"

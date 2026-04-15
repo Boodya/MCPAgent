@@ -15,6 +15,12 @@ from dotenv import load_dotenv
 def main_entry() -> None:
     """Synchronous entry point for the console script."""
     parser = argparse.ArgumentParser(prog="mcpagent", description="Universal AI agent with MCP tool integration")
+    parser.add_argument(
+        "--app-dir", "-d",
+        default=None,
+        metavar="DIR",
+        help="Application directory (overrides MCPAGENT_APP_DIR env var)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     # --- chat (default — interactive REPL) ---
@@ -50,6 +56,11 @@ def main_entry() -> None:
     args = parser.parse_args()
     command = args.command
 
+    # --app-dir overrides the environment variable so that resolve_dirs()
+    # picks it up without threading the value through every function.
+    if args.app_dir:
+        os.environ["MCPAGENT_APP_DIR"] = args.app_dir
+
     # Default to chat if no subcommand
     if command is None:
         command = "chat"
@@ -78,7 +89,7 @@ def main_entry() -> None:
 async def _cmd_chat() -> None:
     from mcpagent.agent_presets import AgentPresetLoader
     from mcpagent.background import BackgroundManager
-    from mcpagent.config import load_app_config
+    from mcpagent.config import load_app_config, resolve_dirs
     from mcpagent.db import JobStore
     from mcpagent.llm import LLMClient
     from mcpagent.mcp_manager import MCPManager
@@ -105,16 +116,16 @@ async def _cmd_chat() -> None:
         load_dotenv(env_path)
 
     # --- Config ---
-    config_dir = Path(os.environ.get("MCPAGENT_CONFIG_DIR", "config"))
-    if not config_dir.exists():
-        alt = Path(__file__).parent.parent.parent / "config"
-        if alt.exists():
-            config_dir = alt
+    config_dir, base_dir = resolve_dirs()
 
     config = load_app_config(config_dir)
 
     # --- Storage (data_dir) ---
-    data_dir = Path(config.storage.data_dir).resolve()
+    data_dir = Path(config.storage.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = (base_dir / data_dir).resolve()
+    else:
+        data_dir = data_dir.resolve()
 
     # --- Ops log ---
     ops = OpsLog(data_dir)
@@ -167,7 +178,7 @@ async def _cmd_chat() -> None:
         # --- Skills ---
         skills_dir = Path(config.skills_dir)
         if not skills_dir.is_absolute():
-            candidate = config_dir.parent / config.skills_dir
+            candidate = base_dir / config.skills_dir
             if candidate.is_dir():
                 skills_dir = candidate
         skill_loader = SkillLoader(skills_dir)
@@ -175,7 +186,7 @@ async def _cmd_chat() -> None:
         # --- Agent Presets ---
         agents_dir = Path(config.agents_dir)
         if not agents_dir.is_absolute():
-            candidate = config_dir.parent / config.agents_dir
+            candidate = base_dir / config.agents_dir
             if candidate.is_dir():
                 agents_dir = candidate
         preset_loader = AgentPresetLoader(agents_dir)
@@ -207,7 +218,7 @@ async def _cmd_chat() -> None:
         # --- Background workflow manager (optional) ---
         workflows_dir = Path(config.workflows_dir)
         if not workflows_dir.is_absolute():
-            candidate = config_dir.parent / config.workflows_dir
+            candidate = base_dir / config.workflows_dir
             if candidate.is_dir():
                 workflows_dir = candidate
         if workflows_dir.is_dir():
@@ -313,27 +324,27 @@ async def _cmd_job(args: argparse.Namespace) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    from mcpagent.config import load_app_config
+    from mcpagent.config import load_app_config, resolve_dirs
     from mcpagent.db import JobStore
     from mcpagent.ops_log import OpsLog
     from mcpagent.workflow_models import WorkflowLoader
     from mcpagent.workflow_engine import WorkflowEngine
 
-    config_dir = Path(os.environ.get("MCPAGENT_CONFIG_DIR", "config"))
-    if not config_dir.exists():
-        alt = Path(__file__).parent.parent.parent / "config"
-        if alt.exists():
-            config_dir = alt
+    config_dir, base_dir = resolve_dirs()
     config = load_app_config(config_dir)
 
-    data_dir = Path(config.storage.data_dir).resolve()
+    data_dir = Path(config.storage.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = (base_dir / data_dir).resolve()
+    else:
+        data_dir = data_dir.resolve()
     ops = OpsLog(data_dir)
     db = JobStore(data_dir / "mcpagent.db")
     await db.init_db()
 
     workflows_dir = Path(config.workflows_dir)
     if not workflows_dir.is_absolute():
-        candidate = config_dir.parent / config.workflows_dir
+        candidate = base_dir / config.workflows_dir
         if candidate.is_dir():
             workflows_dir = candidate
 

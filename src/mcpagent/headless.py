@@ -25,7 +25,7 @@ async def create_agent(
     """
     from mcpagent.agent import Agent
     from mcpagent.agent_presets import AgentPresetLoader
-    from mcpagent.config import load_app_config
+    from mcpagent.config import load_app_config, resolve_dirs
     from mcpagent.llm import LLMClient
     from mcpagent.mcp_manager import MCPManager
     from mcpagent.memory import MemoryManager
@@ -40,14 +40,7 @@ async def create_agent(
         load_dotenv(env_path)
 
     # --- Config dir ---
-    if config_dir is None:
-        config_dir = Path(os.environ.get("MCPAGENT_CONFIG_DIR", "config"))
-    else:
-        config_dir = Path(config_dir)
-    if not config_dir.exists():
-        alt = Path(__file__).parent.parent.parent / "config"
-        if alt.exists():
-            config_dir = alt
+    config_dir, base_dir = resolve_dirs(config_dir)
 
     config = load_app_config(config_dir)
 
@@ -58,7 +51,11 @@ async def create_agent(
     llm = LLMClient(model_cfg, ops=ops)
 
     # --- Storage ---
-    data_dir = Path(config.storage.data_dir).resolve()
+    data_dir = Path(config.storage.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = (base_dir / data_dir).resolve()
+    else:
+        data_dir = data_dir.resolve()
     memory = MemoryManager(data_dir=data_dir)
     storage = StorageManager(
         data_dir=data_dir,
@@ -77,7 +74,7 @@ async def create_agent(
     # --- Skills ---
     skills_dir = Path(config.skills_dir)
     if not skills_dir.is_absolute():
-        candidate = config_dir.parent / config.skills_dir
+        candidate = base_dir / config.skills_dir
         if candidate.is_dir():
             skills_dir = candidate
     skill_loader = SkillLoader(skills_dir)
@@ -85,7 +82,7 @@ async def create_agent(
     # --- Agent presets ---
     agents_dir = Path(config.agents_dir)
     if not agents_dir.is_absolute():
-        candidate = config_dir.parent / config.agents_dir
+        candidate = base_dir / config.agents_dir
         if candidate.is_dir():
             agents_dir = candidate
     preset_loader = AgentPresetLoader(agents_dir)
@@ -102,9 +99,6 @@ async def create_agent(
             await mcp_mgr.ensure_servers(desired)
 
     # --- Agent ---
-    data_dir = Path(config.storage.data_dir)
-    if not data_dir.is_absolute():
-        data_dir = Path.cwd() / data_dir
     platform_paths = {
         "agents_dir": str(agents_dir),
         "skills_dir": str(skills_dir),

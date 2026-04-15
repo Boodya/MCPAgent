@@ -49,19 +49,21 @@ pip install -e .
 
 ```bash
 cp .env.example .env
-# Edit .env — set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, etc.
-# Edit config/config.yaml — tune agent, storage, and tool settings
-# Edit config/mcp.json — add your MCP servers (VS Code format)
+# Edit .env — set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT
+# Set MCPAGENT_APP_DIR to your project folder (see "Application Directory" below)
 ```
 
 ### 3. Run
 
 ```bash
-# Interactive chat (default)
+# Interactive chat (default — uses MCPAGENT_APP_DIR from .env)
 mcpagent
 
+# Same, but pointing at a specific project folder
+mcpagent -d .example-project
+
 # One-shot headless run
-mcpagent run --agent default --message "Summarize the project README"
+mcpagent run -a default -m "Summarize the project README"
 
 # List available workflows
 mcpagent job list
@@ -73,29 +75,240 @@ mcpagent job run example-research
 mcpagent scheduler start
 ```
 
-## CLI Subcommands
+## Application Directory
 
-| Subcommand | Description |
+MCPAgent uses one environment variable — `MCPAGENT_APP_DIR` — to point at a self-contained project folder. All configuration, assets, and runtime data live inside it:
+
+```
+MCPAGENT_APP_DIR/
+├── config.yaml          # app settings (model, agent defaults, tool config)
+├── mcp.json             # MCP server definitions (VS Code compatible)
+├── agents/              # agent preset .md files
+├── skills/              # skill folders with SKILL.md
+├── workflows/           # workflow YAML definitions
+├── memories/            # agent memory (user / session / repo)
+│   ├── user/
+│   ├── session/
+│   └── repo/
+├── history/             # saved chat sessions (JSON)
+├── logs/                # execution logs (JSONL)
+├── ops/                 # ops log
+└── mcpagent.db          # SQLite — workflow runs & step results
+```
+
+### How it works
+
+Set the variable in `.env` (or export it):
+
+```env
+MCPAGENT_APP_DIR=.local-assistants
+```
+
+When `MCPAGENT_APP_DIR` is set:
+- `config.yaml` and `mcp.json` are read from this directory
+- All relative paths in `config.yaml` (`skills_dir`, `agents_dir`, `workflows_dir`, `storage.data_dir`) resolve from this directory
+
+This means you can have **multiple isolated project setups** side by side — just point `MCPAGENT_APP_DIR` at a different folder:
+
+```
+project-root/
+├── .env                        # MCPAGENT_APP_DIR=.local-assistants
+├── .local-assistants/          # ← your main setup
+│   ├── config.yaml
+│   ├── mcp.json
+│   ├── agents/
+│   ├── skills/
+│   └── workflows/
+├── .experiment/                # ← alternative setup
+│   ├── config.yaml
+│   ├── mcp.json
+│   ├── agents/
+│   └── skills/
+└── src/mcpagent/               # source code (never touched)
+```
+
+Switch between them by changing one line in `.env` — or use the `--app-dir` / `-d` CLI flag:
+
+```bash
+mcpagent -d .local-assistants       # uses .local-assistants/
+mcpagent -d .experiment             # uses .experiment/
+mcpagent                            # uses MCPAGENT_APP_DIR from .env
+```
+
+### Legacy mode (without `MCPAGENT_APP_DIR`)
+
+If `MCPAGENT_APP_DIR` is not set, the app falls back to the original layout:
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCPAGENT_CONFIG_DIR` | `config/` | Directory containing `config.yaml` and `mcp.json` |
+
+Relative paths in `config.yaml` resolve from the **parent** of `config_dir` (i.e. the project root). This keeps backward compatibility with the original `config/` folder layout.
+
+## CLI Reference
+
+### Global Options
+
+Every subcommand supports the global `--app-dir` flag:
+
+```
+mcpagent [--app-dir DIR] <command> [args]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--app-dir` | `-d` | `$MCPAGENT_APP_DIR` from `.env` | Application directory — overrides the `MCPAGENT_APP_DIR` environment variable for this run |
+
+This lets you switch between independent project setups without editing `.env`:
+
+```bash
+mcpagent -d .example-project          # interactive chat with .example-project/
+mcpagent -d .local-assistants chat    # same, explicit chat subcommand
+mcpagent -d /abs/path/to/setup run -m "Hello"
+```
+
+Without `-d`, the value of `MCPAGENT_APP_DIR` from `.env` (or environment) is used. If neither is set, falls back to legacy `MCPAGENT_CONFIG_DIR` mode.
+
+---
+
+### `mcpagent chat` — Interactive REPL (default)
+
+```bash
+mcpagent                # equivalent
+mcpagent chat
+mcpagent -d .my-project chat
+```
+
+No additional arguments. Starts a Rich-powered interactive session with streaming output, tool call display, and slash commands.
+
+When launched, the agent:
+1. Loads config from `MCPAGENT_APP_DIR` (or `--app-dir`)
+2. Connects MCP servers required by the default agent preset
+3. Enters the interactive REPL
+
+#### Interactive Slash Commands
+
+| Command | Description |
 |---|---|
-| `mcpagent` / `mcpagent chat` | Interactive chat session (default) |
-| `mcpagent run -a AGENT -m MSG` | Run agent headlessly with a single message |
-| `mcpagent job list` | List available workflows |
-| `mcpagent job run NAME` | Run a workflow by name (manual trigger) |
-| `mcpagent job history [NAME]` | Show run history (optionally filtered) |
-| `mcpagent job status RUN_ID` | Show status of a specific run |
-| `mcpagent scheduler start` | Start the scheduler daemon |
-| `mcpagent scheduler status` | Show scheduled workflows and next run times |
+| `/help` | Show available commands |
+| `/exit` | Exit the agent |
+| `/clear` | Clear conversation history (starts fresh) |
+| `/tools` | List all available tools (built-in + MCP) |
+| `/servers` | Show MCP server connection status |
+| `/memory` | Show memory directory contents |
+| `/agents` | List available agent presets |
+| `/agent <name>` | Switch to a different agent preset (manages MCP servers) |
+| `/skills` | List available skill modules |
+| `/context` | Show context window usage (tokens used / remaining) |
+| `/bg` | Show background workflow tasks and their status |
+| `/reload` | Reload agents, skills, and MCP config from disk (hot-reload) |
 
-### Interactive Slash Commands
+---
 
-| Command    | Description                     |
-|------------|---------------------------------|
-| `/help`    | Show available commands         |
-| `/tools`   | List all available tools        |
-| `/servers` | Show MCP server status          |
-| `/memory`  | Show user memory contents       |
-| `/clear`   | Clear conversation history      |
-| `/exit`    | Exit the agent                  |
+### `mcpagent run` — Headless One-Shot Execution
+
+Run an agent with a single message and exit. Useful for scripting, CI/CD, and cron jobs.
+
+```bash
+mcpagent run --message "Summarize the README"
+mcpagent run -a web-researcher -m "Find latest news on AI agents"
+mcpagent -d .my-project run -a analyst -m "Analyze sales data"
+```
+
+| Flag | Short | Required | Default | Description |
+|---|---|---|---|---|
+| `--message` | `-m` | **yes** | — | Message to send to the agent |
+| `--agent` | `-a` | no | `default_agent` from config | Agent preset name to use |
+
+The agent runs a full ReAct loop (tool calls, iterations), prints the final response to stdout, and exits. Chat history is saved to the history directory.
+
+---
+
+### `mcpagent job` — Workflow Management
+
+Manage and run YAML-defined workflows.
+
+#### `mcpagent job list`
+
+List all available workflows from the `workflows/` directory.
+
+```bash
+mcpagent job list
+mcpagent -d .my-project job list
+```
+
+Output columns: `Name`, `Schedule`, `Enabled`, `Steps count`.
+
+#### `mcpagent job run <name>`
+
+Run a workflow by name (manual trigger, synchronous).
+
+```bash
+mcpagent job run example-research
+mcpagent -d .my-project job run power-platform-news
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `name` | **yes** | Workflow name (matches `name:` field in YAML, or filename without `.yaml`) |
+
+Runs the full DAG: resolves dependencies, executes steps in topological order (parallel where possible), respects retries and conditions. Prints per-step status on completion.
+
+#### `mcpagent job history [name]`
+
+Show workflow run history.
+
+```bash
+mcpagent job history                 # all workflows
+mcpagent job history example-research  # filter by name
+mcpagent job history -n 50           # last 50 runs
+```
+
+| Argument / Flag | Required | Default | Description |
+|---|---|---|---|
+| `name` | no | all | Filter by workflow name |
+| `--limit` / `-n` | no | `20` | Maximum number of rows to display |
+
+#### `mcpagent job status <run_id>`
+
+Show detailed status of a specific workflow run including per-step results.
+
+```bash
+mcpagent job status 42
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `run_id` | **yes** | Numeric run ID (from `job history` output) |
+
+---
+
+### `mcpagent scheduler` — Workflow Scheduler Daemon
+
+#### `mcpagent scheduler start`
+
+Start a long-running scheduler daemon that triggers workflows based on their `schedule` (cron) or `interval` settings.
+
+```bash
+mcpagent scheduler start
+mcpagent -d .my-project scheduler start
+```
+
+The scheduler:
+- Scans `workflows/` for enabled workflows with `schedule` or `interval`
+- Runs indefinitely, triggering workflows at their configured times
+- Uses headless agent instances for each workflow step
+- Persists all run results to `mcpagent.db`
+
+Stop with `Ctrl+C`.
+
+#### `mcpagent scheduler status`
+
+Show configured scheduled workflows and their next run times.
+
+```bash
+mcpagent scheduler status
+```
 
 ## Workflows
 
@@ -177,16 +390,25 @@ Steps `summary-ru` and `summary-en` run **in parallel** since they share the sam
 
 ### .env
 
-All Azure OpenAI settings are read from environment variables (`.env` file):
+Azure OpenAI credentials and the application directory are set here:
 
 ```env
+# Azure OpenAI (required)
 AZURE_OPENAI_API_KEY=your-key-here
 AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 AZURE_OPENAI_DEPLOYMENT=gpt-4o
 AZURE_OPENAI_API_VERSION=2025-01-01-preview
+
+# Application directory (recommended)
+MCPAGENT_APP_DIR=.local-assistants
+
+# Logging level
+MCPAGENT_LOG_LEVEL=WARNING
 ```
 
-### config/config.yaml
+### config.yaml
+
+Located inside `MCPAGENT_APP_DIR` (or `config/` in legacy mode):
 
 ```yaml
 models:
@@ -194,17 +416,23 @@ models:
     provider: azure
 
 default_model: default
-default_agent: default
+default_agent: assistant          # agent preset from agents/*.md
 
 agent:
   max_iterations: 30
+  context_window: 128000
+  summarize_threshold: 0.7
+  max_tool_result_tokens: 8000
+  summary_max_tokens: 1000
 
 storage:
-  data_dir: ".mcpagent"
+  data_dir: "."                   # relative to MCPAGENT_APP_DIR
   chat_history: true
   logs: true
 
-workflows_dir: "workflows"      # directory with workflow YAML files
+skills_dir: "skills"              # relative to MCPAGENT_APP_DIR
+agents_dir: "agents"
+workflows_dir: "workflows"
 
 tools:
   read_file:
@@ -219,9 +447,11 @@ tools:
     confirm: false
 ```
 
-### config/mcp.json
+When using `MCPAGENT_APP_DIR`, all relative paths (`data_dir`, `skills_dir`, `agents_dir`, `workflows_dir`) resolve from that directory. Setting `data_dir: "."` keeps everything in one place.
 
-Uses the same format as VS Code `mcp.json`. Supports `stdio` and `http` transport types. Environment variable placeholders (`${input:NAME}`, `${env:NAME}`) are resolved from `.env` or environment variables.
+### mcp.json
+
+Located alongside `config.yaml`. Uses the same format as VS Code `mcp.json`. Supports `stdio` and `http` transport types. Environment variable placeholders (`${input:NAME}`, `${env:NAME}`) are resolved from `.env` or environment variables.
 
 ```json
 {
@@ -231,10 +461,26 @@ Uses the same format as VS Code `mcp.json`. Supports `stdio` and `http` transpor
       "command": "npx",
       "args": ["-y", "some-mcp-server"],
       "env": { "API_KEY": "${env:MY_API_KEY}" }
+    },
+    "remote-server": {
+      "type": "http",
+      "url": "https://example.com/api/mcp"
     }
   }
 }
 ```
+
+### Environment Variables Reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCPAGENT_APP_DIR` | *(not set)* | Self-contained project directory. When set, `config.yaml`, `mcp.json`, and all relative paths resolve from here |
+| `MCPAGENT_CONFIG_DIR` | `config/` | Legacy: directory with `config.yaml` + `mcp.json`. Ignored when `MCPAGENT_APP_DIR` is set |
+| `MCPAGENT_LOG_LEVEL` | `WARNING` | Python logging level (`DEBUG`, `INFO`, `WARNING`) |
+| `AZURE_OPENAI_API_KEY` | — | Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT` | — | Model deployment name |
+| `AZURE_OPENAI_API_VERSION` | `2024-12-01-preview` | API version |
 
 ## Architecture
 
@@ -265,15 +511,25 @@ Uses the same format as VS Code `mcp.json`. Supports `stdio` and `http` transpor
 
 ## Storage Layout
 
-All persistent data lives under a single configurable `data_dir`:
+All persistent data lives under `data_dir` (configured in `config.yaml`). When using `MCPAGENT_APP_DIR` with `data_dir: "."`, everything stays in one folder:
 
 ```
-<data_dir>/
+MCPAGENT_APP_DIR/
+├── config.yaml
+├── mcp.json
+├── agents/
+│   └── assistant.md
+├── skills/
+│   └── summarizer/
+│       └── SKILL.md
+├── workflows/
+│   └── example-research.yaml
 ├── mcpagent.db               # SQLite — workflow runs & step results
 ├── history/                   # Chat history (one JSON per session)
 │   └── chat_20260414_145618.json
 ├── logs/                      # Execution logs (one JSONL per session)
 │   └── session_20260414_145618.jsonl
+├── ops/                       # Operational metrics
 └── memories/
     ├── user/                  # Persistent across all sessions
     ├── session/               # Current conversation only
@@ -284,5 +540,6 @@ Memory is exposed as tools (`memory_view`, `memory_create`, `memory_update`, `me
 
 ## Roadmap
 
-- [ ] **Phase 2**: Skills (SKILL.md) & Agent presets
-- [ ] **Phase 3**: Sub-agent orchestration, Textual TUI, @references
+- [ ] Sub-agent orchestration
+- [ ] Textual TUI
+- [ ] @references

@@ -122,6 +122,41 @@ class AppConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Directory resolution
+# ---------------------------------------------------------------------------
+
+def resolve_dirs(config_dir_override: str | Path | None = None) -> tuple[Path, Path]:
+    """Determine (config_dir, base_dir) from environment.
+
+    Returns:
+        config_dir: where config.yaml and mcp.json live
+        base_dir:   root for resolving relative paths (skills_dir, agents_dir, etc.)
+
+    If MCPAGENT_APP_DIR is set, both point to that directory — everything
+    is self-contained inside one folder.
+    Otherwise falls back to MCPAGENT_CONFIG_DIR (default ``config/``) with
+    base_dir = config_dir.parent (project root).
+    """
+    app_dir = os.environ.get("MCPAGENT_APP_DIR")
+    if app_dir:
+        p = Path(app_dir)
+        return p, p
+
+    if config_dir_override is not None:
+        config_dir = Path(config_dir_override)
+    else:
+        config_dir = Path(os.environ.get("MCPAGENT_CONFIG_DIR", "config"))
+
+    if not config_dir.exists():
+        alt = Path(__file__).parent.parent.parent / "config"
+        if alt.exists():
+            config_dir = alt
+
+    return config_dir, config_dir.parent
+    mcp: McpConfig = Field(default_factory=McpConfig)
+
+
+# ---------------------------------------------------------------------------
 # Placeholder resolution  ${input:NAME} / ${env:NAME} → env vars / .env
 # ---------------------------------------------------------------------------
 

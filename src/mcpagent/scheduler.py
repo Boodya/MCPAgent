@@ -8,7 +8,7 @@ import os
 import signal
 from pathlib import Path
 
-from mcpagent.config import load_app_config
+from mcpagent.config import load_app_config, resolve_dirs
 from mcpagent.db import JobStore
 from mcpagent.workflow_engine import WorkflowEngine
 from mcpagent.workflow_models import WorkflowDefinition, WorkflowLoader
@@ -20,13 +20,7 @@ class SchedulerService:
     """Built-in daemon that runs workflow schedules using asyncio + cron parsing."""
 
     def __init__(self, config_dir: str | Path | None = None) -> None:
-        if config_dir is None:
-            config_dir = Path(os.environ.get("MCPAGENT_CONFIG_DIR", "config"))
-        self._config_dir = Path(config_dir)
-        if not self._config_dir.exists():
-            alt = Path(__file__).parent.parent.parent / "config"
-            if alt.exists():
-                self._config_dir = alt
+        self._config_dir, self._base_dir = resolve_dirs(config_dir)
 
         self._config = load_app_config(self._config_dir)
         self._stop_event = asyncio.Event()
@@ -34,13 +28,17 @@ class SchedulerService:
 
     async def start(self) -> None:
         """Start the scheduler daemon. Blocks until stopped (Ctrl+C / SIGTERM)."""
-        data_dir = Path(self._config.storage.data_dir).resolve()
+        data_dir = Path(self._config.storage.data_dir)
+        if not data_dir.is_absolute():
+            data_dir = (self._base_dir / data_dir).resolve()
+        else:
+            data_dir = data_dir.resolve()
         db = JobStore(data_dir / "mcpagent.db")
         await db.init_db()
 
         workflows_dir = Path(self._config.workflows_dir)
         if not workflows_dir.is_absolute():
-            candidate = self._config_dir.parent / self._config.workflows_dir
+            candidate = self._base_dir / self._config.workflows_dir
             if candidate.is_dir():
                 workflows_dir = candidate
 
@@ -133,7 +131,7 @@ class SchedulerService:
 
         workflows_dir = Path(self._config.workflows_dir)
         if not workflows_dir.is_absolute():
-            candidate = self._config_dir.parent / self._config.workflows_dir
+            candidate = self._base_dir / self._config.workflows_dir
             if candidate.is_dir():
                 workflows_dir = candidate
 

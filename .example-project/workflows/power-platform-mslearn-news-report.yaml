@@ -1,0 +1,76 @@
+name: power-platform-mslearn-news-report
+description: "Analyze Microsoft Learn for recent Power Platform news/updates and write a detailed Markdown report into the project data directory."
+# Manual by default. If you want scheduling, set one of these:
+# schedule: "0 9 * * 1"   # every Monday 09:00 UTC
+# interval: 604800         # every 7 days
+enabled: true
+
+vars:
+  topic: "Power Platform"
+  # Relative to the MCPAgent working directory. This writes into the configured data_dir.
+  output_dir: ".example-project/reports/power-platform"
+  report_prefix: "power-platform-mslearn-news"
+  time_window: "last 30 days"
+
+steps:
+  - id: research-mslearn
+    agent: mslearn-architect
+    timeout: 900
+    retry:
+      count: 2
+      delay: 10.0
+    prompt: |
+      You are preparing a "latest news" report about Microsoft Power Platform.
+
+      Use ONLY official Microsoft Learn / microsoft.com sources.
+      Focus on updates and announcements within {{vars.time_window}}.
+
+      Tasks:
+      1) Use the microsoft-learn MCP tools to search for recent updates across Power Platform:
+         - Power Apps
+         - Power Automate
+         - Power Pages
+         - Power BI
+         - Copilot Studio (Power Virtual Agents)
+         - Dataverse
+         - Governance / ALM / CoE Starter Kit
+      2) Identify the most relevant pages (aim for ~8-15 sources).
+      3) Fetch the full content for each high-value page.
+      4) Produce a structured research pack in Markdown with:
+         - A bullet list of sources (title + URL)
+         - For each source: key excerpts (quoted), date signals if present, and why it matters
+         - A short "What changed" summary per product area
+
+      Output ONLY the research pack markdown.
+
+  - id: write-report
+    agent: mslearn-analyst
+    depends_on: [research-mslearn]
+    timeout: 600
+    prompt: |
+      Create a detailed Markdown report based on the research pack below, then save it to disk.
+
+      Research pack:
+      {{steps.research-mslearn.result}}
+
+      Report requirements:
+      - Title: "{{vars.topic}} — Latest updates ({{vars.time_window}})"
+      - Sections:
+        1) Executive summary (5-10 bullets)
+        2) Key updates by product area (Power Apps / Automate / Pages / BI / Copilot Studio / Dataverse / Governance)
+        3) Notable features & impact (who benefits, prerequisites, limitations)
+        4) Action items / recommendations (what to try, what to monitor)
+        5) Sources (deduplicated list of URLs)
+      - Be explicit about uncertainty: if a claim isn't clearly supported by sources, mark it as "Unconfirmed".
+
+      File output:
+      - Ensure directory exists: {{vars.output_dir}}
+      - Filename: {{vars.report_prefix}}-YYYYMMDD.md (use today's date)
+
+      Use built-in tools to:
+      - create the directory if needed
+      - write the markdown file
+
+      Return:
+      - the full file path you wrote
+      - a short table of contents
