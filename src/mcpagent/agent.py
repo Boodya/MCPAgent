@@ -201,17 +201,35 @@ class Agent:
 
         # Inject available workflows for background execution
         if self.background:
-            wf_names = self.background.get_workflow_names()
-            if wf_names:
-                wf_list = "\n".join(f"- {n}" for n in wf_names)
+            catalog = self.background.get_workflow_catalog()
+            if catalog:
+                wf_lines: list[str] = []
+                for wf in catalog:
+                    line = f"- **{wf['name']}**"
+                    if wf.get("description"):
+                        line += f": {wf['description']}"
+                    wf_lines.append(line)
+                    if wf.get("vars"):
+                        for k, v in wf["vars"].items():
+                            wf_lines.append(f"  - `{k}`: default = `{v}`")
+                wf_block = "\n".join(wf_lines)
                 system += (
                     "\n\n<backgroundWorkflows>\n"
                     "You can run workflows in the background using the `workflow_run` tool. "
                     "This starts a workflow asynchronously and returns immediately — the user "
-                    "can continue chatting while it runs. You will be notified when it completes.\n"
+                    "can continue chatting while it runs. You will be notified when it completes.\n\n"
+                    "CRITICAL — workflow variables:\n"
+                    "- Every workflow has a `vars` section with input parameters.\n"
+                    "- You MUST pass the user's input as `vars` when calling `workflow_run`. "
+                    "If a variable has an empty default (`\"\"` or `<REQUIRED>`), the workflow "
+                    "WILL FAIL or produce empty results if you do not provide a value.\n"
+                    "- Map the user's request to the workflow's expected variables. "
+                    "For example, if the user says \"search for X\", pass `{\"query\": \"X\"}`.\n"
+                    "- NEVER call `workflow_run` with only the name and no vars unless you are "
+                    "certain all defaults are correct for the user's intent.\n\n"
                     "Use `workflow_status` to check on running tasks, "
-                    "and `workflow_list` to see available workflows.\n"
-                    f"\nAvailable workflows:\n{wf_list}\n"
+                    "and `workflow_list` to see available workflows with their variables.\n\n"
+                    f"Available workflows:\n{wf_block}\n"
                     "</backgroundWorkflows>"
                 )
 
@@ -717,14 +735,18 @@ class Agent:
 
         async def _handle_workflow_run(args: dict[str, Any]) -> str:
             name = args.get("name", "")
+            vars_override = args.get("vars") or None
             try:
-                task_id = self.background.submit(name)  # type: ignore[union-attr]
+                task_id = self.background.submit(name, vars_override=vars_override)  # type: ignore[union-attr]
+                msg = f"Workflow '{name}' started in background as {task_id}. "
+                if vars_override:
+                    msg += f"Variables overridden: {list(vars_override.keys())}. "
+                msg += "You will be notified when it completes."
                 return json.dumps({
                     "status": "submitted",
                     "task_id": task_id,
                     "workflow": name,
-                    "message": f"Workflow '{name}' started in background as {task_id}. "
-                               f"You will be notified when it completes.",
+                    "message": msg,
                 })
             except ValueError as exc:
                 return json.dumps({"error": str(exc)})
@@ -735,10 +757,23 @@ class Agent:
             (
                 "Start a workflow in the background. The workflow runs asynchronously "
                 "while the user continues chatting. Returns a task ID immediately. "
-                "You will receive a notification when the workflow completes."
+                "You will receive a notification when the workflow completes. "
+                "Use 'vars' to override workflow variables defined in the YAML — "
+                "runtime values take precedence over YAML defaults."
             ),
             _schema(
-                {"name": {"type": "string", "description": "Name of the workflow to run."}},
+                {
+                    "name": {"type": "string", "description": "Name of the workflow to run."},
+                    "vars": {
+                        "type": "object",
+                        "description": (
+                            "Optional key-value dict to override workflow variables at runtime. "
+                            "These override the 'vars' section in the workflow YAML. "
+                            "Example: {\"topic\": \"Azure\", \"time_window\": \"last 7 days\"}"
+                        ),
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
                 required=["name"],
             ),
         )
@@ -746,13 +781,17 @@ class Agent:
         # --- workflow_list ---
 
         async def _handle_workflow_list(args: dict[str, Any]) -> str:
-            names = self.background.get_workflow_names()  # type: ignore[union-attr]
-            return json.dumps({"workflows": names})
+            catalog = self.background.get_workflow_catalog()  # type: ignore[union-attr]
+            return json.dumps({"workflows": catalog})
 
         self.tools.register(
             "workflow_list",
             _handle_workflow_list,
-            "List all available workflow definitions that can be run.",
+            (
+                "List all available workflow definitions with their descriptions "
+                "and expected variables. Use this to check what vars a workflow needs "
+                "before calling workflow_run."
+            ),
             _schema({}),
         )
 
@@ -760,12 +799,13 @@ class Agent:
 
         async def _handle_workflow_status(args: dict[str, Any]) -> str:
             task_id = args.get("task_id")
+            include_results = args.get("include_results", True)
             tasks = self.background.get_tasks(task_id)  # type: ignore[union-attr]
             if not tasks:
                 return json.dumps({"message": "No background tasks found."})
             result = []
             for t in tasks:
-                entry = {
+                entry: dict[str, Any] = {
                     "task_id": t.id,
                     "workflow": t.workflow_name,
                     "status": t.status,
@@ -775,6 +815,23 @@ class Agent:
                     entry["finished_at"] = t.finished_at.isoformat()
                 if t.error:
                     entry["error"] = t.error
+                # Include step results for completed/failed tasks
+                if include_results and t.result and t.result.step_results:
+                    steps_info = []
+                    for sr in t.result.step_results:
+                        step_entry: dict[str, Any] = {
+                            "step_id": sr.step_id,
+                            "status": sr.status,
+                        }
+                        if sr.error:
+                            step_entry["error"] = sr.error
+                        if sr.result:
+                            text = sr.result
+                            if len(text) > 12_000:
+                                text = text[:12_000] + f"\n... [TRUNCATED: {len(sr.result)} chars total]"
+                            step_entry["result"] = text
+                        steps_info.append(step_entry)
+                    entry["steps"] = steps_info
                 result.append(entry)
             return json.dumps({"tasks": result})
 
@@ -783,9 +840,16 @@ class Agent:
             _handle_workflow_status,
             (
                 "Check the status of background workflow tasks. "
-                "Call without arguments to see all tasks, or pass a task_id to check a specific one."
+                "Call without arguments to see all tasks, or pass a task_id to check a specific one. "
+                "By default includes step results for completed tasks — set include_results=false to get a compact view."
             ),
             _schema(
-                {"task_id": {"type": "string", "description": "Optional task ID to check (e.g. 'bg-1')."}},
+                {
+                    "task_id": {"type": "string", "description": "Optional task ID to check (e.g. 'bg-1')."},
+                    "include_results": {
+                        "type": "boolean",
+                        "description": "Include step result text in the response (default: true). Set false for a compact status-only view.",
+                    },
+                },
             ),
         )

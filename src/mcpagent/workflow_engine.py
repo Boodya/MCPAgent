@@ -14,6 +14,7 @@ from mcpagent.ops_log import OpsLog
 from mcpagent.workflow_models import (
     WorkflowDefinition,
     WorkflowStep,
+    _VAR_RE,
     render_template,
     topological_levels,
 )
@@ -85,13 +86,17 @@ class WorkflowEngine:
         self,
         workflow: WorkflowDefinition,
         trigger_type: str = "manual",
+        vars_override: dict[str, Any] | None = None,
     ) -> RunResult:
         run_id = await self.db.create_run(workflow.name, trigger_type)
         log.info("Starting workflow '%s' (run #%d)", workflow.name, run_id)
         self.ops.workflow_start(workflow=workflow.name, run_id=run_id)
 
         # Build context dicts for template rendering
+        # Runtime vars_override takes precedence over YAML defaults
         vars_ctx = dict(workflow.vars)
+        if vars_override:
+            vars_ctx.update(vars_override)
         step_results: dict[str, StepResult] = {}
         # For condition eval: steps_ctx['step-id'] has .result and .status
         steps_ctx: dict[str, _StepCtx] = {}
@@ -202,6 +207,14 @@ class WorkflowEngine:
         }
         rendered_prompt = render_template(step.prompt, render_ctx)
 
+        # Log unresolved placeholders so debugging is easier
+        unresolved = _VAR_RE.findall(rendered_prompt)
+        if unresolved:
+            log.warning(
+                "Step '%s' prompt has unresolved placeholders: %s",
+                step.id, unresolved,
+            )
+
         sr_id = await self.db.create_step_run(
             run_id, step.id, step.agent, prompt_rendered=rendered_prompt)
         self.ops.workflow_step_start(
@@ -234,6 +247,12 @@ class WorkflowEngine:
                 # Success
                 sr = StepResult(
                     step_id=step.id, status="completed", result=result.text)
+                if not result.text.strip():
+                    log.warning(
+                        "Step '%s' completed but returned empty result. "
+                        "Downstream steps referencing {{steps.%s.result}} will get an empty string.",
+                        step.id, step.id,
+                    )
                 step_results[step.id] = sr
                 steps_ctx[step.id] = _StepCtx(result=result.text, status="completed")
                 await self.db.update_step_run(

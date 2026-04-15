@@ -174,6 +174,84 @@ All `vars` values are converted to strings during interpolation. There is no typ
 - Topics, names, paths, URLs
 - Configuration values that you want to change without editing prompts
 
+### Runtime variable overrides (vars_override)
+
+Vars defined in the YAML `vars:` section are **defaults**. They can be overridden at runtime from any entry point:
+
+| Entry point | How to pass overrides |
+|---|---|
+| CLI | `mcpagent job run <name> --var key=value --var key2=value2` |
+| AI tool (`workflow_run`) | `{"name": "my-workflow", "vars": {"topic": "Azure", "time_window": "last 7 days"}}` |
+| BackgroundManager (Python) | `bg.submit("my-workflow", vars_override={"topic": "Azure"})` |
+| WorkflowEngine (Python) | `engine.run_workflow(wf, vars_override={"topic": "Azure"})` |
+
+**Merge semantics:** runtime values are merged on top of YAML defaults via `dict.update()`. Only the specified keys are overridden — all other YAML vars remain intact.
+
+**Example:** Given a workflow YAML with:
+```yaml
+vars:
+  topic: "Power Platform"
+  time_window: "last 30 days"
+  output_dir: "reports/"
+```
+
+And a CLI invocation:
+```bash
+mcpagent job run my-report --var topic=Azure
+```
+
+The effective vars at runtime will be:
+- `topic` = `"Azure"` (overridden)
+- `time_window` = `"last 30 days"` (YAML default)
+- `output_dir` = `"reports/"` (YAML default)
+
+**AI agent example:**
+When a user says "run the report workflow for Azure for the last week", the agent should call:
+```json
+{
+  "name": "my-report",
+  "vars": {
+    "topic": "Azure",
+    "time_window": "last 7 days"
+  }
+}
+```
+
+### Diagnostics for variable issues
+
+The engine provides two diagnostic warnings in logs:
+
+1. **Unresolved placeholders** — if after rendering, the prompt still contains `{{...}}` patterns, a warning is logged listing all unresolved placeholders. Common causes:
+   - Typo in variable name (`{{vars.tpoic}}` instead of `{{vars.topic}}`)
+   - Missing `depends_on` for a `{{steps.X.result}}` reference
+   - Variable not defined in YAML `vars:` and not passed via `vars_override`
+
+2. **Empty step result** — if a step completes successfully but its `result.text` is empty, a warning is logged. This means downstream steps referencing `{{steps.X.result}}` will receive an empty string. Common causes:
+   - The agent used tools but didn't produce a final text summary
+   - The agent timed out on the last iteration
+   - The LLM returned an empty response
+
+Enable verbose logging to see these:
+```bash
+MCPAGENT_LOG_LEVEL=DEBUG mcpagent job run my-workflow
+```
+
+### Vars visibility to the master agent (system prompt injection)
+
+When the interactive chat agent has background workflows available, the system prompt auto-injects a `<backgroundWorkflows>` block that lists:
+- Each workflow's **name** and **description**
+- Each workflow's **vars** with their default values
+- Variables with empty defaults (`""`) are shown as `<REQUIRED — no default>`
+
+This means the master agent **sees** the full variable schema before calling `workflow_run`. The injection also includes explicit instructions to ALWAYS map the user's intent to workflow vars.
+
+**Best practices for workflow authors:**
+- Give every workflow a clear `description` — the agent sees it in the catalog
+- Give vars descriptive names (`query`, `topic`, `space`) — the agent uses them to map user intent
+- Use empty string `""` as default for vars that MUST be provided by the user (e.g., `query`)
+- Use sensible non-empty defaults for optional vars (e.g., `time_window_days: "365"`, `limit: "25"`)
+- Add YAML comments (e.g., `# runtime: what to search for`) — they won't be shown to the agent, but help human editors
+
 ---
 
 ## 6. Agent Presets
@@ -374,6 +452,10 @@ mcpagent job list
 # Run a specific workflow
 mcpagent job run daily-report
 
+# Run with variable overrides (--var or -v, repeatable)
+mcpagent job run daily-report --var topic=Azure --var time_window="last 7 days"
+mcpagent job run daily-report -v topic=Azure -v output_dir=reports/azure
+
 # View run history
 mcpagent job history
 mcpagent job history daily-report --limit 10
@@ -398,9 +480,99 @@ mcpagent scheduler status
 mcpagent run --agent default --message "Summarize the README"
 ```
 
+### From interactive chat (AI tool)
+
+The master agent can trigger workflows via `workflow_run` tool:
+
+```json
+{"name": "daily-report", "vars": {"topic": "Azure"}}
+```
+
+The workflow runs asynchronously. When it finishes, the master agent **automatically receives the full results** — it does not need to poll or call `workflow_status`.
+
 ---
 
-## 12. SQLite State Store
+## 12. Result Propagation to Master Agent
+
+When a workflow completes in the background, the master agent receives **all step results** as part of the completion notification. This means the agent can analyze, summarize and present the results to the user even if the workflow didn't save anything to disk.
+
+### How it works
+
+1. Agent calls `workflow_run` → gets `task_id` immediately
+2. Workflow executes asynchronously (all steps run via headless agents)
+3. On completion, `BackgroundEvent` is built with a summary that includes:
+   - Status of each step (completed / failed / skipped)
+   - **Full text result** of every completed step (truncated at ~12K chars per step)
+4. The CLI injects this as a `[BACKGROUND WORKFLOW NOTIFICATION]` message into the agent context
+5. The agent processes the notification and reports to the user
+
+### What the agent sees (example notification)
+
+```
+[BACKGROUND WORKFLOW NOTIFICATION]
+A background workflow has finished. Report the results to the user.
+
+Task ID: bg-1
+Workflow: confluence-search-analyze-summary
+Status: completed
+Details:
+Workflow 'confluence-search-analyze-summary' completed.
+
+  ✓ search: completed
+  ✓ analyze: completed
+  ✓ summary: completed
+
+=== STEP RESULTS ===
+
+--- [search] ---
+CQL_USED: space = "CECM" AND text ~ "Nintex"
+RESULTS:
+- 12345 | Nintex Migration Plan | CECM | v8 | https://wiki/...
+...
+
+--- [analyze] ---
+Key facts:
+- Nintex Classic is being decommissioned by Q3 2026 (https://wiki/...)
+...
+
+--- [summary] ---
+## TL;DR
+- Migration deadline: Q3 2026 (https://wiki/...)
+...
+```
+
+### workflow_status tool
+
+The `workflow_status` tool also returns step results for completed tasks:
+
+```json
+{
+  "tasks": [{
+    "task_id": "bg-1",
+    "workflow": "daily-report",
+    "status": "completed",
+    "started_at": "...",
+    "finished_at": "...",
+    "steps": [
+      {"step_id": "search", "status": "completed", "result": "...actual text..."},
+      {"step_id": "analyze", "status": "completed", "result": "...actual text..."}
+    ]
+  }]
+}
+```
+
+Use `include_results: false` for a compact status-only view.
+
+### Token budget considerations
+
+- Each step result is truncated to ~12K characters in the notification
+- The notification is then subject to normal tool result truncation (`max_tool_result_tokens` from config)
+- For very large results, the agent may see truncated output — design workflow steps to produce concise summaries when possible
+- If you need the full untruncated output, the workflow step should save it to a file and include the file path in its response
+
+---
+
+## 13. SQLite State Store
 
 All runs are persisted in `<data_dir>/mcpagent.db` (default: `.mcpagent/mcpagent.db`).
 
@@ -433,7 +605,7 @@ All runs are persisted in `<data_dir>/mcpagent.db` (default: `.mcpagent/mcpagent
 
 ---
 
-## 13. Common Patterns
+## 14. Common Patterns
 
 ### Pattern: Research → Analyze → Report
 
@@ -542,7 +714,7 @@ steps:
 
 ---
 
-## 14. Validation Checklist
+## 15. Validation Checklist
 
 Before finalizing a workflow, verify:
 
@@ -559,7 +731,7 @@ Before finalizing a workflow, verify:
 
 ---
 
-## 15. Debugging
+## 16. Debugging
 
 ### Enable verbose logging
 

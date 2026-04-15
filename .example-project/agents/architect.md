@@ -52,7 +52,7 @@ You have three core skills. **Always load the relevant skill before doing the wo
 |---|---|
 | `mcpagent` or `mcpagent chat` | Interactive REPL with Rich streaming UI |
 | `mcpagent run -a <agent> -m "..."` | Headless one-shot run, prints result and exits |
-| `mcpagent job run <name>` | Execute a workflow by name |
+| `mcpagent job run <name> [--var K=V ...]` | Execute a workflow by name (with optional variable overrides) |
 | `mcpagent job list` | List available workflows |
 | `mcpagent job history [name]` | Show run history from SQLite |
 | `mcpagent job status <run_id>` | Inspect a specific run |
@@ -249,9 +249,9 @@ triggers:                      # optional — keywords for auto-matching
 | `memory_delete` | Delete memory file or directory | `tools.memory_delete` |
 | `load_skill` | Load a skill module by name (agent-registered) | — |
 | `call_agent` | Invoke a sub-agent (agent-registered) | — |
-| `workflow_run` | Start a background workflow (agent-registered) | — |
-| `workflow_status` | Check background task status (agent-registered) | — |
-| `workflow_list` | List available workflows (agent-registered) | — |
+| `workflow_run` | Start a background workflow; accepts `name` + `vars` override dict (agent-registered) | — |
+| `workflow_status` | Check background task status; includes step results (agent-registered) | — |
+| `workflow_list` | List available workflows with descriptions and expected vars (agent-registered) | — |
 
 **Tool filtering:** `to_openai_tools(allowed)` applies the preset's `tools` filter. Wildcard `memory_*` matches all memory tools. `load_skill` and `call_agent` always pass through filters.
 
@@ -343,19 +343,42 @@ on_failure: "stop"       # "stop" | "continue"
 8. If any step fails and `on_failure != "continue"`, downstream dependents are skipped
 
 **Template variables:**
-- `{{vars.KEY}}` — from workflow `vars` dict
+- `{{vars.KEY}}` — from workflow `vars` dict (YAML defaults merged with runtime overrides)
 - `{{steps.STEP_ID.result}}` — text output of a completed step
 - `{{steps.STEP_ID.status}}` — "completed" | "failed" | "skipped"
+
+**Runtime variable overrides:**
+- `run_workflow(wf, vars_override={...})` — runtime values take precedence over YAML defaults
+- CLI: `mcpagent job run <name> --var key=value --var key2=value2`
+- AI tool: `workflow_run` with `vars` parameter: `{"topic": "Azure", "time_window": "last 7 days"}`
+- Background: `BackgroundManager.submit(name, vars_override={...})`
+
+**Diagnostics:**
+- If a step completes with an empty result, a warning is logged: downstream `{{steps.X.result}}` will be empty string
+- If rendered prompt still contains unresolved `{{...}}` placeholders, a warning lists them
 
 ### 4.10. Background execution (`background.py`)
 
 **BackgroundManager** — runs workflows asynchronously from interactive chat.
 
-- `submit(workflow_name)` → returns `task_id` immediately
+- `submit(workflow_name, vars_override=None)` → returns `task_id` immediately
+- `vars_override` is an optional `dict[str, str]` — runtime values that override the `vars:` section in the workflow YAML
 - Execution happens in `asyncio.create_task`
 - On completion/failure, pushes `BackgroundEvent` to `events: asyncio.Queue`
 - CLI polls the queue during `_wait_for_input()` (0.5s intervals) and auto-triggers agent notification
 - `get_tasks()` / `cancel(task_id)` for status and cancellation
+
+**Result propagation to master agent:**
+- When a workflow completes, the `BackgroundEvent.summary` includes **full step results** (truncated to ~12K chars per step), not just status lines
+- The CLI injects the entire summary as a `[BACKGROUND WORKFLOW NOTIFICATION]` user message into the agent context
+- This means the master agent **always** sees what the workflow produced — it can analyze, summarize, and present results to the user without needing the workflow to save anything to disk
+- `workflow_status` tool also returns step results for completed tasks (set `include_results: false` for compact view)
+
+**System prompt injection:**
+- `<backgroundWorkflows>` section is auto-injected into the system prompt
+- It lists every workflow with its **description** and **vars** (with defaults)
+- Variables with empty defaults (`""`) are highlighted as required
+- The injection includes explicit instructions: the agent MUST map user intent to workflow vars
 
 Agent gets three tools: `workflow_run`, `workflow_status`, `workflow_list`.
 

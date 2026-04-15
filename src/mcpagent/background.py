@@ -6,13 +6,18 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from mcpagent.workflow_engine import RunResult, WorkflowEngine
     from mcpagent.workflow_models import WorkflowLoader
 
 log = logging.getLogger(__name__)
+
+# Max characters per step result in the notification summary.
+# Keeps the notification digestible while still giving the agent
+# enough content to analyse and respond to the user.
+_MAX_RESULT_CHARS = 12_000
 
 
 @dataclass
@@ -65,7 +70,22 @@ class BackgroundManager:
         """Return names of all available workflows."""
         return [wf.name for wf in self._loader.load_all()]
 
-    def submit(self, workflow_name: str) -> str:
+    def get_workflow_catalog(self) -> list[dict[str, Any]]:
+        """Return structured info (name, description, vars) for all workflows."""
+        result = []
+        for wf in self._loader.load_all():
+            entry: dict[str, Any] = {"name": wf.name}
+            if wf.description:
+                entry["description"] = wf.description
+            if wf.vars:
+                entry["vars"] = {
+                    k: (v if v else "<REQUIRED — no default>")
+                    for k, v in wf.vars.items()
+                }
+            result.append(entry)
+        return result
+
+    def submit(self, workflow_name: str, vars_override: dict | None = None) -> str:
         """Start a workflow in the background. Returns a task ID immediately."""
         workflows = {wf.name: wf for wf in self._loader.load_all()}
         wf = workflows.get(workflow_name)
@@ -86,7 +106,7 @@ class BackgroundManager:
             started_at=now,
         )
         task._asyncio_task = asyncio.create_task(
-            self._run(task_id, wf),
+            self._run(task_id, wf, vars_override=vars_override),
             name=f"bg-workflow-{workflow_name}",
         )
         self._tasks[task_id] = task
@@ -131,23 +151,39 @@ class BackgroundManager:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _run(self, task_id: str, wf) -> None:  # noqa: ANN001
+    async def _run(self, task_id: str, wf, *, vars_override: dict | None = None) -> None:  # noqa: ANN001
         """Execute workflow and push a completion event."""
         task = self._tasks[task_id]
         try:
-            result = await self._engine.run_workflow(wf, trigger_type="background")
+            result = await self._engine.run_workflow(wf, trigger_type="background", vars_override=vars_override)
             task.status = result.status
             task.result = result
             task.finished_at = datetime.now(timezone.utc)
 
-            # Build human-readable summary
+            # Build human-readable summary **with step results**
             lines = [f"Workflow '{wf.name}' {result.status}."]
+            lines.append("")
             for sr in result.step_results:
                 icon = {"completed": "✓", "failed": "✗", "skipped": "⊘"}.get(
                     sr.status, "?"
                 )
                 detail = f" — {sr.error}" if sr.error else ""
                 lines.append(f"  {icon} {sr.step_id}: {sr.status}{detail}")
+
+            # Append actual step results so the master agent can analyse them.
+            completed = [sr for sr in result.step_results if sr.result]
+            if completed:
+                lines.append("")
+                lines.append("=== STEP RESULTS ===")
+                for sr in completed:
+                    lines.append(f"\n--- [{sr.step_id}] ---")
+                    text = sr.result
+                    if len(text) > _MAX_RESULT_CHARS:
+                        text = text[:_MAX_RESULT_CHARS] + (
+                            f"\n\n... [TRUNCATED: showing {_MAX_RESULT_CHARS} of "
+                            f"{len(sr.result)} chars]"
+                        )
+                    lines.append(text)
 
             await self.events.put(
                 BackgroundEvent(

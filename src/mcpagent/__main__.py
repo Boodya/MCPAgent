@@ -37,6 +37,10 @@ def main_entry() -> None:
 
     job_run_p = job_sub.add_parser("run", help="Run a workflow by name")
     job_run_p.add_argument("name", help="Workflow name")
+    job_run_p.add_argument(
+        "--var", "-v", action="append", default=[], metavar="KEY=VALUE",
+        help="Override workflow variable (repeatable, e.g. --var topic=Azure --var time_window='last 7 days')",
+    )
 
     job_sub.add_parser("list", help="List available workflows")
 
@@ -369,8 +373,18 @@ async def _cmd_job(args: argparse.Namespace) -> None:
         if not wf:
             print(f"Workflow '{args.name}' not found. Available: {list(workflows.keys())}", file=sys.stderr)
             sys.exit(1)
+
+        # Parse --var KEY=VALUE overrides
+        vars_override: dict[str, str] = {}
+        for item in args.var:
+            if "=" not in item:
+                print(f"Invalid --var format: '{item}'. Expected KEY=VALUE", file=sys.stderr)
+                sys.exit(1)
+            key, _, value = item.partition("=")
+            vars_override[key] = value
+
         engine = WorkflowEngine(db, ops=ops)
-        run_result = await engine.run_workflow(wf)
+        run_result = await engine.run_workflow(wf, vars_override=vars_override or None)
         print(f"\nWorkflow '{wf.name}' — {run_result.status}")
         if run_result.error:
             print(f"Error: {run_result.error}")
