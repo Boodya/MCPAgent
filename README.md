@@ -45,6 +45,15 @@ cd MCPAgent
 pip install -e .
 ```
 
+This registers the `mcpagent` command globally — you can run it from **any terminal and any directory**, not just from the project folder. The `-e` (editable) flag means changes to source code in `src/mcpagent/` take effect immediately without reinstalling.
+
+To verify:
+
+```bash
+# From any directory:
+mcpagent --help
+```
+
 ### 2. Configure
 
 ```bash
@@ -405,6 +414,18 @@ MCPAGENT_APP_DIR=.local-assistants
 # Logging level
 MCPAGENT_LOG_LEVEL=WARNING
 ```
+
+#### .env File Resolution
+
+Since `mcpagent` can be run from any directory, it searches for `.env` in multiple locations (first match wins):
+
+| Priority | Location | When useful |
+|---|---|---|
+| 1 | **Current working directory** | Running from a project folder that has its own `.env` |
+| 2 | **`--app-dir` / `MCPAGENT_APP_DIR`** | App directory has a dedicated `.env` |
+| 3 | **MCPAgent install root** (where the source code lives) | Global fallback — works from any terminal |
+
+In practice, put your `.env` in the MCPAgent repo root (`D:\Personal-Repos\MCPAgent\.env`) and it will be picked up automatically no matter where you run the command from. If you need per-project overrides, place a `.env` in that project's directory and `cd` into it before running.
 
 ### config.yaml
 

@@ -12,6 +12,30 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+def _load_env(app_dir: str | None = None) -> None:
+    """Load .env from the first location found.
+
+    Search order:
+    1. Current working directory
+    2. --app-dir / MCPAGENT_APP_DIR
+    3. MCPAgent project root (where this package is installed from)
+    """
+    candidates: list[Path] = [Path.cwd() / ".env"]
+
+    ad = app_dir or os.environ.get("MCPAGENT_APP_DIR")
+    if ad:
+        candidates.append(Path(ad) / ".env")
+
+    # Project root — two levels up from this file (src/mcpagent/__main__.py)
+    project_root = Path(__file__).resolve().parent.parent.parent
+    candidates.append(project_root / ".env")
+
+    for p in candidates:
+        if p.is_file():
+            load_dotenv(p)
+            return
+
+
 def main_entry() -> None:
     """Synchronous entry point for the console script."""
     parser = argparse.ArgumentParser(prog="mcpagent", description="Universal AI agent with MCP tool integration")
@@ -65,6 +89,9 @@ def main_entry() -> None:
     if args.app_dir:
         os.environ["MCPAGENT_APP_DIR"] = args.app_dir
 
+    # Load .env early — before any subcommand needs env vars
+    _load_env(args.app_dir)
+
     # Default to chat if no subcommand
     if command is None:
         command = "chat"
@@ -113,11 +140,6 @@ async def _cmd_chat() -> None:
         level=getattr(logging, log_level, logging.WARNING),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-
-    # --- Load .env ---
-    env_path = Path(".env")
-    if env_path.exists():
-        load_dotenv(env_path)
 
     # --- Config ---
     config_dir, base_dir = resolve_dirs()

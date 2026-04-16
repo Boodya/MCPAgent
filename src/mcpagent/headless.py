@@ -7,8 +7,6 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
-from dotenv import load_dotenv
-
 log = logging.getLogger(__name__)
 
 
@@ -34,10 +32,7 @@ async def create_agent(
     from mcpagent.storage import StorageManager
     from mcpagent.tools import ToolRegistry
 
-    # --- .env ---
-    env_path = Path(".env")
-    if env_path.exists():
-        load_dotenv(env_path)
+    # (.env is already loaded by main_entry)
 
     # --- Config dir ---
     config_dir, base_dir = resolve_dirs(config_dir)
