@@ -39,14 +39,16 @@ class LLMClient:
         self.config = config
         self.ops = ops or OpsLog(None)
 
-        # Resolve API key: use api_key_env if specified, else provider defaults
-        key_env = config.api_key_env or _default_key_env(config.provider)
-        api_key = os.environ.get(key_env, "")
+        # Resolve API key: prefer direct value from config (YAML), then env var
+        api_key = config.api_key
         if not api_key:
-            raise ValueError(
-                f"Environment variable {key_env} is not set. "
-                "Please set it in your .env file or environment."
-            )
+            key_env = config.api_key_env or _default_key_env(config.provider)
+            api_key = os.environ.get(key_env, "")
+            if not api_key:
+                raise ValueError(
+                    f"API key for provider '{config.provider}' is not set. "
+                    f"Set 'api_key' in config.yaml or the {key_env} environment variable."
+                )
 
         if config.provider == "azure":
             self._client: AsyncAzureOpenAI | AsyncOpenAI = AsyncAzureOpenAI(

@@ -1,10 +1,23 @@
 # MCPAgent configuration
-# All Azure OpenAI settings are read from .env (see .env.example)
-# Values here serve as fallbacks if env vars are not set.
+# Azure OpenAI settings can be set here directly or via .env (YAML takes priority).
+# Use ${env:VAR_NAME} syntax to reference environment variables.
 
 models:
   default:
     provider: azure
+    # All fields below are optional — unset fields fall back to .env / environment variables
+    # endpoint: "${env:AZURE_OPENAI_ENDPOINT}"
+    # api_key: "${env:AZURE_OPENAI_API_KEY}"    # or set directly (not recommended for secrets)
+    # deployment: "gpt-4.1"
+    # api_version: "2025-04-01-preview"
+
+  # Example: second Azure deployment fully configured in YAML
+  # azure-fast:
+  #   provider: azure
+  #   endpoint: "https://my-resource.openai.azure.com/"
+  #   api_key: "${env:AZURE_OPENAI_API_KEY}"
+  #   deployment: "gpt-4.1-mini"
+  #   api_version: "2025-04-01-preview"
 
   # NVIDIA NIM (self-hosted or build.nvidia.com hosted API)
   # Uncomment and set NVIDIA_API_KEY in .env to use

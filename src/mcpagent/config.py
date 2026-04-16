@@ -29,6 +29,7 @@ class ModelConfig(BaseModel):
     endpoint: str = ""           # base_url for openai-compat; azure_endpoint for Azure
     deployment: str = ""         # Azure deployment name (Azure only)
     model_name: str = ""         # model name for non-Azure providers
+    api_key: str = ""            # API key value (set directly in YAML or via ${env:VAR})
     api_key_env: str = ""        # env var to read API key from (auto-detected if empty)
     api_version: str = "2024-12-01-preview"
     max_tokens: int = 4096
@@ -250,16 +251,20 @@ def load_mcp_config(path: str | Path) -> McpConfig:
 
 
 def _env_override_model(cfg: ModelConfig) -> ModelConfig:
-    """Override ModelConfig fields from environment variables.
+    """Fill missing ModelConfig fields from environment variables (env as fallback).
     Azure-specific env vars are only applied to Azure provider models.
+    YAML/direct values always take precedence over env vars.
     """
     if cfg.provider == "azure":
-        if v := os.environ.get("AZURE_OPENAI_ENDPOINT"):
-            cfg.endpoint = v
-        if v := os.environ.get("AZURE_OPENAI_DEPLOYMENT"):
-            cfg.deployment = v
+        if not cfg.endpoint:
+            cfg.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+        if not cfg.deployment:
+            cfg.deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")
+        if not cfg.api_key:
+            cfg.api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
         if v := os.environ.get("AZURE_OPENAI_API_VERSION"):
-            cfg.api_version = v
+            if cfg.api_version == "2024-12-01-preview":  # still at default, apply env
+                cfg.api_version = v
         if v := os.environ.get("AZURE_OPENAI_MAX_TOKENS"):
             cfg.max_tokens = int(v)
         if v := os.environ.get("AZURE_OPENAI_TEMPERATURE"):
@@ -286,9 +291,16 @@ def load_app_config(config_dir: str | Path) -> AppConfig:
     else:
         raw = {}
 
+    # Resolve ${env:VAR} / ${input:VAR} placeholders in model configs
+    if "models" in raw and isinstance(raw["models"], dict):
+        raw["models"] = {
+            name: _resolve_dict(mcfg) if isinstance(mcfg, dict) else mcfg
+            for name, mcfg in raw["models"].items()
+        }
+
     app_cfg = AppConfig(**raw)
 
-    # --- env overrides for model ---
+    # --- env fallbacks for model (only fills fields not set in YAML) ---
     for name, model_cfg in app_cfg.models.items():
         _env_override_model(model_cfg)
 
