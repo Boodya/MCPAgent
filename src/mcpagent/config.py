@@ -96,6 +96,7 @@ class ToolsConfig(BaseModel):
     memory_create: BuiltinToolConfig = Field(default_factory=BuiltinToolConfig)
     memory_update: BuiltinToolConfig = Field(default_factory=BuiltinToolConfig)
     memory_delete: BuiltinToolConfig = Field(default_factory=BuiltinToolConfig)
+    wait_seconds: BuiltinToolConfig = Field(default_factory=BuiltinToolConfig)
 
 
 class McpServerConfig(BaseModel):

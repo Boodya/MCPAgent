@@ -841,7 +841,10 @@ class Agent:
             (
                 "Check the status of background workflow tasks. "
                 "Call without arguments to see all tasks, or pass a task_id to check a specific one. "
-                "By default includes step results for completed tasks — set include_results=false to get a compact view."
+                "By default includes step results for completed tasks — set include_results=false to get a compact view. "
+                "IMPORTANT: you will be automatically notified when a workflow finishes — "
+                "do NOT poll in a tight loop. If polling is necessary, use the 'wait_seconds' tool "
+                "to wait at least 30 seconds between calls."
             ),
             _schema(
                 {

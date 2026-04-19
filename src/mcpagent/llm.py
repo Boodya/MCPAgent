@@ -162,8 +162,21 @@ class LLMClient:
     # Retry logic with exponential backoff for 429 and 5xx
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _retry_after(exc: "APIStatusError") -> float | None:
+        """Extract wait time (seconds) from Retry-After or x-ratelimit-reset-* headers."""
+        try:
+            headers = exc.response.headers
+            # Standard Retry-After (seconds or HTTP-date)
+            ra = headers.get("retry-after") or headers.get("x-ratelimit-reset-requests")
+            if ra:
+                return max(1.0, float(ra))
+        except Exception:
+            pass
+        return None
+
     async def _request_with_retry(
-        self, *, _max_retries: int = 3, _base_delay: float = 1.0, **kwargs: Any
+        self, *, _max_retries: int = 5, _base_delay: float = 1.0, **kwargs: Any
     ) -> Any:
         last_exc: Exception | None = None
         for attempt in range(_max_retries + 1):
@@ -172,7 +185,13 @@ class LLMClient:
             except APIStatusError as exc:
                 status = exc.status_code
                 if status in (429, 500, 502, 503) and attempt < _max_retries:
-                    delay = _base_delay * (2 ** attempt)
+                    if status == 429:
+                        # Respect Retry-After header; floor at 30s for rate limits
+                        server_hint = self._retry_after(exc)
+                        delay = server_hint if server_hint else max(30.0, _base_delay * (2 ** attempt))
+                    else:
+                        # 5xx: fast exponential backoff (1→2→4→8→16s)
+                        delay = _base_delay * (2 ** attempt)
                     log.warning(
                         "LLM request failed (%s), retrying in %.1fs (attempt %d/%d)",
                         status, delay, attempt + 1, _max_retries,

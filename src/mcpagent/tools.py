@@ -33,10 +33,16 @@ _DEFAULT_DESCRIPTIONS: dict[str, str] = {
     "list_dir": "List contents of a directory.",
     "grep_search": "Search for a text pattern (regex) in files under a directory.",
     "run_command": "Run a shell command and return stdout/stderr. Use with caution.",
-    "memory_view": "View a memory file or list a memory directory. Paths: memories/user/..., memories/session/..., memories/repo/...",
+    # Memory descriptions are built dynamically (include actual data_dir) — see _build_memory_descriptions()
+    "memory_view": "View a memory file or list a memory directory.",
     "memory_create": "Create a new memory file. Fails if it already exists.",
     "memory_update": "Replace an exact string in a memory file (must appear exactly once).",
     "memory_delete": "Delete a memory file or directory.",
+    "wait_seconds": (
+        "Pause execution for the specified number of seconds. "
+        "Use this between repeated calls to polling tools (e.g. workflow_status) "
+        "to avoid rate limits and excessive API usage. Cap: 300 seconds."
+    ),
 }
 
 
@@ -144,6 +150,27 @@ class ToolRegistry:
             return cfg.description
         return _DEFAULT_DESCRIPTIONS.get(name, "")
 
+    def _mem_desc(self, name: str) -> str:
+        """Return memory tool description, config override takes priority.
+
+        Falls back to a dynamically built description that includes the
+        actual on-disk root so the LLM can construct correct virtual paths.
+        """
+        cfg = getattr(self.tools_config, name, None)
+        if cfg and cfg.description:
+            return cfg.description
+        mem_root = self.memory.data_dir / "memories"
+        path_hint = (
+            f"Virtual path format: 'memories/<scope>/<file>.md' "
+            f"(maps to {mem_root}/<scope>/<file>.md on disk). "
+            f"Scopes: user (persistent across sessions), "
+            f"session (current conversation only), "
+            f"repo (project-specific notes). "
+            f"Example: memories/session/signals.md"
+        )
+        base = _DEFAULT_DESCRIPTIONS.get(name, "")
+        return f"{base} {path_hint}"
+
     def _register_builtins(self) -> None:
         tc = self.tools_config
 
@@ -226,10 +253,10 @@ class ToolRegistry:
             self.register(
                 "memory_view",
                 self._memory_view,
-                self._desc("memory_view"),
+                self._mem_desc("memory_view"),
                 _schema(
                     {
-                        "path": {"type": "string", "description": "Virtual memory path."},
+                        "path": {"type": "string", "description": "Virtual memory path (e.g. 'memories/session/notes.md')."},
                         "startLine": {"type": "integer", "description": "Optional start line (1-based)."},
                         "endLine": {"type": "integer", "description": "Optional end line (1-based)."},
                     },
@@ -241,10 +268,10 @@ class ToolRegistry:
             self.register(
                 "memory_create",
                 self._memory_create,
-                self._desc("memory_create"),
+                self._mem_desc("memory_create"),
                 _schema(
                     {
-                        "path": {"type": "string", "description": "Virtual memory path."},
+                        "path": {"type": "string", "description": "Virtual memory path (e.g. 'memories/session/notes.md')."},
                         "content": {"type": "string", "description": "File content."},
                     },
                     required=["path", "content"],
@@ -255,10 +282,10 @@ class ToolRegistry:
             self.register(
                 "memory_update",
                 self._memory_update,
-                self._desc("memory_update"),
+                self._mem_desc("memory_update"),
                 _schema(
                     {
-                        "path": {"type": "string", "description": "Virtual memory path."},
+                        "path": {"type": "string", "description": "Virtual memory path (e.g. 'memories/session/notes.md')."},
                         "oldStr": {"type": "string", "description": "Exact string to find."},
                         "newStr": {"type": "string", "description": "Replacement string."},
                     },
@@ -270,10 +297,27 @@ class ToolRegistry:
             self.register(
                 "memory_delete",
                 self._memory_delete,
-                self._desc("memory_delete"),
+                self._mem_desc("memory_delete"),
                 _schema(
-                    {"path": {"type": "string", "description": "Virtual memory path."}},
+                    {"path": {"type": "string", "description": "Virtual memory path (e.g. 'memories/session/notes.md')."}},
                     required=["path"],
+                ),
+            )
+
+        # --- wait_seconds ---
+        if tc.wait_seconds.enabled:
+            self.register(
+                "wait_seconds",
+                self._wait,
+                self._desc("wait_seconds"),
+                _schema(
+                    {
+                        "seconds": {
+                            "type": "number",
+                            "description": "Number of seconds to wait (1–300).",
+                        },
+                    },
+                    required=["seconds"],
                 ),
             )
 
@@ -376,3 +420,8 @@ class ToolRegistry:
 
     async def _memory_delete(self, args: dict[str, Any]) -> str:
         return self.memory.delete(args["path"])
+
+    async def _wait(self, args: dict[str, Any]) -> str:
+        seconds = max(0.0, min(float(args.get("seconds", 10)), 300.0))
+        await asyncio.sleep(seconds)
+        return f"Waited {seconds:.0f} seconds."
