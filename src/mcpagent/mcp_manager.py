@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -100,10 +101,17 @@ class MCPManager:
                 log.warning("MCP server '%s' not found in config, skipping", name)
                 return
             try:
-                await self._start_server(name, cfg)
+                timeout = cfg.startup_timeout
+                await asyncio.wait_for(self._start_server(name, cfg), timeout=timeout)
                 async with lock:
                     started.append(name)
                 log.info("MCP server '%s' connected (%d tools)", name, len(self._connections[name].tools))
+            except asyncio.TimeoutError:
+                log.error(
+                    "MCP server '%s' failed to start within %ds (startup_timeout). "
+                    "Check that the command exists and any required services are running.",
+                    name, cfg.startup_timeout,
+                )
             except Exception:
                 log.exception("Failed to start MCP server '%s'", name)
 
@@ -154,10 +162,14 @@ class MCPManager:
                 if not cfg.command:
                     raise ValueError(f"MCP server '{name}': stdio type requires 'command'")
 
+                # Always inherit the parent process environment so that
+                # PATH and other required vars are available to the subprocess.
+                # Server-specific env vars are merged on top.
+                merged_env = {**os.environ, **cfg.env} if cfg.env else None
                 params = StdioServerParameters(
                     command=cfg.command,
                     args=cfg.args,
-                    env={**cfg.env} if cfg.env else None,
+                    env=merged_env,
                 )
                 transport = await stack.enter_async_context(stdio_client(params))
 

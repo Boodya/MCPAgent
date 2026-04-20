@@ -23,7 +23,15 @@ models:
     model_name: moonshotai/kimi-k2.5
     api_key: ""    # or set directly (not recommended for secrets)
     max_tokens: 8192
-  
+
+  ollama-local:
+    provider: ollama
+    # endpoint defaults to http://localhost:11434/v1 — override if Ollama runs elsewhere
+    # endpoint: http://localhost:11434/v1
+    model_name: gemma3:12b     # any model you have pulled locally (ollama pull qwen3:8b)
+    max_tokens: 8192
+    # No api_key required for Ollama
+
     
 default_model: nvidia-kimi      # azure-gpt-5.4
 default_agent: default          # agent preset to activate on startup (must match name in agents/*.md)

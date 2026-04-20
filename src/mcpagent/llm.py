@@ -21,6 +21,14 @@ _PROVIDER_KEY_ENV: dict[str, str] = {
     "nvidia": "NVIDIA_API_KEY",
 }
 
+# Providers that don't require a real API key
+_NO_KEY_PROVIDERS = {"ollama"}
+
+# Default base URLs for well-known local providers
+_DEFAULT_ENDPOINTS: dict[str, str] = {
+    "ollama": "http://localhost:11434/v1",
+}
+
 
 def _default_key_env(provider: str) -> str:
     return _PROVIDER_KEY_ENV.get(provider, f"{provider.upper()}_API_KEY")
@@ -42,13 +50,18 @@ class LLMClient:
         # Resolve API key: prefer direct value from config (YAML), then env var
         api_key = config.api_key
         if not api_key:
-            key_env = config.api_key_env or _default_key_env(config.provider)
-            api_key = os.environ.get(key_env, "")
-            if not api_key:
-                raise ValueError(
-                    f"API key for provider '{config.provider}' is not set. "
-                    f"Set 'api_key' in config.yaml or the {key_env} environment variable."
-                )
+            if config.provider in _NO_KEY_PROVIDERS:
+                api_key = config.provider  # dummy key accepted by local providers
+            else:
+                key_env = config.api_key_env or _default_key_env(config.provider)
+                api_key = os.environ.get(key_env, "")
+                if not api_key:
+                    raise ValueError(
+                        f"API key for provider '{config.provider}' is not set. "
+                        f"Set 'api_key' in config.yaml or the {key_env} environment variable."
+                    )
+
+        self._is_ollama = config.provider == "ollama"
 
         if config.provider == "azure":
             self._client: AsyncAzureOpenAI | AsyncOpenAI = AsyncAzureOpenAI(
@@ -57,10 +70,11 @@ class LLMClient:
                 api_version=config.api_version,
             )
         else:
-            # OpenAI-compatible: OpenAI, NVIDIA NIM, local, etc.
+            # OpenAI-compatible: OpenAI, NVIDIA NIM, Ollama, local, etc.
+            endpoint = config.endpoint or _DEFAULT_ENDPOINTS.get(config.provider, "")
             client_kwargs: dict[str, Any] = {"api_key": api_key}
-            if config.endpoint:
-                client_kwargs["base_url"] = config.endpoint
+            if endpoint:
+                client_kwargs["base_url"] = endpoint
             self._client = AsyncOpenAI(**client_kwargs)
 
         self.deployment = config.deployment or config.model_name
@@ -81,17 +95,20 @@ class LLMClient:
         step_id: str | None = None,
     ) -> AsyncIterator[Any]:
         """Stream chat completion chunks. Yields raw OpenAI chunk objects."""
+        tokens_key = "max_tokens" if self._is_ollama else "max_completion_tokens"
         kwargs: dict[str, Any] = {
             "model": self.deployment,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
-            "max_completion_tokens": max_tokens or self.config.max_tokens,
+            tokens_key: max_tokens or self.config.max_tokens,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
+        if not self._is_ollama:
+            kwargs["stream_options"] = {"include_usage": True}
         if tools:
             kwargs["tools"] = tools
-            kwargs["parallel_tool_calls"] = True
+            if not self._is_ollama:
+                kwargs["parallel_tool_calls"] = True
 
         timer = self.ops.llm_request(
             agent=agent_name,
@@ -125,16 +142,18 @@ class LLMClient:
         step_id: str | None = None,
     ) -> Any:
         """Non-streaming completion. Returns full ChatCompletion response."""
+        tokens_key = "max_tokens" if self._is_ollama else "max_completion_tokens"
         kwargs: dict[str, Any] = {
             "model": self.deployment,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
-            "max_completion_tokens": max_tokens or self.config.max_tokens,
+            tokens_key: max_tokens or self.config.max_tokens,
             "stream": False,
         }
         if tools:
             kwargs["tools"] = tools
-            kwargs["parallel_tool_calls"] = True
+            if not self._is_ollama:
+                kwargs["parallel_tool_calls"] = True
 
         timer = self.ops.llm_request(
             agent=agent_name,

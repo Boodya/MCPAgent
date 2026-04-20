@@ -22,6 +22,7 @@ class ModelConfig(BaseModel):
     provider="azure"  — Azure OpenAI (uses AZURE_OPENAI_API_KEY by default)
     provider="nvidia" — NVIDIA NIM (uses NVIDIA_API_KEY by default)
     provider="openai" — OpenAI API (uses OPENAI_API_KEY by default)
+    provider="ollama" — Local Ollama server (no API key needed; default endpoint http://localhost:11434/v1)
     Any other value   — OpenAI-compatible endpoint; set endpoint + api_key_env.
     """
 
@@ -108,6 +109,7 @@ class McpServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     url: str | None = None
     tools: list[str] | None = None  # optional tool filter
+    startup_timeout: int = 30       # seconds to wait for the server to initialize
 
 
 class McpConfig(BaseModel):
